@@ -13,9 +13,13 @@ import (
 // China cards; the set mirrors the CN entry of the MCC table used for upstream
 // proxy routing (460/461). It is keyed by MCC with a display name for logs and
 // user-facing messaging.
+//
+// 临时移除（研究测试使用）：注释掉 460/461 条目使 map 为空，
+// RegionBlockReason 将永远返回空串，所有调用点的 if 判断条件恒为 false，
+// 不再阻止中国大陆 SIM 卡的任何服务。回滚时恢复下方两条目即可。
 var BlockedMCCs = map[string]string{
-	"460": "中国",
-	"461": "中国",
+	// "460": "中国",
+	// "461": "中国",
 }
 
 // CardMCCMNC splits an IMSI into its mobile country code and mobile network
