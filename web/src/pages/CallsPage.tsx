@@ -1,10 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, apiMessage } from "../api";
 import { useI18n } from "../lib/i18n";
-import { Button, PageHeader, StatusDot, Tabs } from "../components/ui";
+import { Button, PageHeader, StatusDot, Tabs, message } from "../components/ui";
 import { DeviceCallPanel } from "../components/devices/DeviceCallPanel";
+import { SaveContactDialog } from "../components/devices/SaveContactDialog";
 import { listContacts } from "../components/sms/smsApi";
 import { cx } from "../lib/utils";
+import {
+  addLocalContact,
+  loadLocalContacts,
+  newLocalContactId,
+  type LocalContact,
+} from "../lib/localContacts";
 import {
   appendCallHistory,
   clearCallHistory,
@@ -38,6 +45,8 @@ export default function CallsPage() {
   const [number, setNumber] = useState("");
   const [tab, setTab] = useState<"history" | "contacts">("history");
   const [history, setHistory] = useState<CallHistoryEntry[]>(() => loadCallHistory());
+  const [localContacts, setLocalContacts] = useState<LocalContact[]>(() => loadLocalContacts());
+  const [saveTarget, setSaveTarget] = useState<CallHistoryEntry | null>(null);
   const [contacts, setContacts] = useState<SMSContact[]>([]);
   const [contactsLoading, setContactsLoading] = useState(false);
   const [error, setError] = useState("");
@@ -100,6 +109,17 @@ export default function CallsPage() {
   const outcomeLabel = useCallback(
     (outcome: CallOutcome) =>
       outcome === "answered" ? t("已接通") : outcome === "missed" ? t("未接") : t("呼叫失败"),
+    [t],
+  );
+
+  const handleSaveContact = useCallback(
+    (name: string, number: string) => {
+      setLocalContacts(
+        addLocalContact({ id: newLocalContactId(), name, number, createdAt: new Date().toISOString() }),
+      );
+      setSaveTarget(null);
+      message.success(t("已保存为联系人"));
+    },
     [t],
   );
 
@@ -200,13 +220,15 @@ export default function CallsPage() {
                 ) : (
                   <div className="space-y-1">
                     {history.map((entry) => (
-                      <button
+                      <div
                         key={entry.id}
-                        type="button"
-                        onClick={() => setNumber(entry.number)}
-                        className="flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-black/5 dark:hover:bg-white/5"
+                        className="flex items-center justify-between gap-3 rounded-lg px-3 py-2 transition-colors hover:bg-black/5 dark:hover:bg-white/5"
                       >
-                        <span className="min-w-0">
+                        <button
+                          type="button"
+                          onClick={() => setNumber(entry.number)}
+                          className="min-w-0 flex-1 text-left"
+                        >
                           <span className="block truncate text-sm font-medium text-gray-900 dark:text-gray-100">
                             {entry.number || t("未知号码")}
                           </span>
@@ -215,18 +237,50 @@ export default function CallsPage() {
                             {formatTime(entry.startedAt)}
                             {entry.durationSeconds > 0 ? ` · ${formatDuration(entry.durationSeconds)}` : ""}
                           </span>
-                        </span>
-                        <span className="shrink-0 text-xs text-[#0ea5e9]">{t("拨打")}</span>
-                      </button>
+                        </button>
+                        <div className="flex shrink-0 items-center gap-3 text-xs">
+                          <button type="button" className="text-[#0ea5e9]" onClick={() => setNumber(entry.number)}>
+                            {t("拨打")}
+                          </button>
+                          <button
+                            type="button"
+                            className="text-gray-500 transition-colors hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200"
+                            onClick={() => setSaveTarget(entry)}
+                          >
+                            {t("保存")}
+                          </button>
+                        </div>
+                      </div>
                     ))}
                   </div>
                 )
-              ) : contactsLoading ? (
-                <div className="py-6 text-center text-sm text-gray-400">{t("加载中...")}</div>
-              ) : contacts.length === 0 ? (
-                <div className="py-6 text-center text-sm text-gray-400">{t("暂无联系人")}</div>
+              ) : localContacts.length === 0 && contacts.length === 0 ? (
+                <div className="py-6 text-center text-sm text-gray-400">
+                  {contactsLoading ? t("加载中...") : t("暂无联系人")}
+                </div>
               ) : (
                 <div className="space-y-1">
+                  {localContacts.map((contact) => (
+                    <button
+                      key={contact.id}
+                      type="button"
+                      onClick={() => setNumber(contact.number)}
+                      className="flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-black/5 dark:hover:bg-white/5"
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm font-medium text-gray-900 dark:text-gray-100">
+                          {contact.name}
+                        </span>
+                        <span className="block truncate font-mono text-[10px] text-gray-400">{contact.number}</span>
+                      </span>
+                      <span className="flex shrink-0 items-center gap-2">
+                        <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-300">
+                          {t("本地")}
+                        </span>
+                        <span className="text-xs text-[#0ea5e9]">{t("拨打")}</span>
+                      </span>
+                    </button>
+                  ))}
                   {contacts.map((contact) => (
                     <button
                       key={`${contact.deviceId}-${contact.peer}`}
@@ -251,6 +305,12 @@ export default function CallsPage() {
           </div>
         </div>
       </div>
+      <SaveContactDialog
+        open={saveTarget !== null}
+        initialNumber={saveTarget?.number ?? ""}
+        onClose={() => setSaveTarget(null)}
+        onSave={handleSaveContact}
+      />
     </div>
   );
 }
