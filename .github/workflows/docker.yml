@@ -69,6 +69,14 @@ jobs:
   build-and-push:
     needs: smoke
     runs-on: ubuntu-latest
+    # 国内仓库（华为云 SWR）相关配置。全部通过仓库 Secrets/Variables 提供；
+    # 未配置 HUAWEI_SWR_REGION / HUAWEI_SWR_NAMESPACE 时自动跳过 SWR 推送，
+    # 只推 GHCR，不影响原有构建。
+    env:
+      SWR_REGION: ${{ secrets.HUAWEI_SWR_REGION }}
+      SWR_NAMESPACE: ${{ secrets.HUAWEI_SWR_NAMESPACE }}
+      SWR_AK: ${{ secrets.HUAWEI_CLOUD_ACCESS_KEY }}
+      SWR_SK: ${{ secrets.HUAWEI_CLOUD_SECRET_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -86,6 +94,35 @@ jobs:
             echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
           fi
           echo "build_time=$(git show -s --format=%cI HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Compute image tags
+        id: tags
+        env:
+          GHCR_REPO: ${{ steps.repo.outputs.name }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SWR_REPOSITORY: ${{ vars.HUAWEI_SWR_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          SWR_REPO="${SWR_REPOSITORY:-vocat}"
+          {
+            echo "ghcr.io/${GHCR_REPO}:latest"
+            echo "ghcr.io/${GHCR_REPO}:${VERSION}"
+          } > /tmp/tags.txt
+          swr_enabled=false
+          if [ -n "${SWR_REGION}" ] && [ -n "${SWR_NAMESPACE}" ]; then
+            swr_enabled=true
+            echo "swr.${SWR_REGION}.myhuaweicloud.com/${SWR_NAMESPACE}/${SWR_REPO}:latest" >> /tmp/tags.txt
+            echo "swr.${SWR_REGION}.myhuaweicloud.com/${SWR_NAMESPACE}/${SWR_REPO}:${VERSION}" >> /tmp/tags.txt
+          fi
+          {
+            echo "tags<<EOF"
+            cat /tmp/tags.txt
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "swr_enabled=${swr_enabled}" >> "$GITHUB_OUTPUT"
+          echo "swr_repository=${SWR_REPO}" >> "$GITHUB_OUTPUT"
+          echo "--- image tags ---"
+          cat /tmp/tags.txt
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -107,6 +144,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Huawei SWR
+        if: steps.tags.outputs.swr_enabled == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: swr.${{ env.SWR_REGION }}.myhuaweicloud.com
+          username: ${{ secrets.HUAWEI_SWR_DOCKER_USERNAME }}
+          password: ${{ secrets.HUAWEI_SWR_DOCKER_PASSWORD }}
+
       - name: Build and push multi-arch image
         uses: docker/build-push-action@v7
         with:
@@ -117,8 +162,63 @@ jobs:
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
             BUILD_TIME=${{ steps.version.outputs.build_time }}
-          tags: |
-            ${{ env.REGISTRY }}/${{ steps.repo.outputs.name }}:latest
-            ${{ env.REGISTRY }}/${{ steps.repo.outputs.name }}:${{ steps.version.outputs.version }}
+          tags: ${{ steps.tags.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Set up Python for SWR API
+        if: steps.tags.outputs.swr_enabled == 'true' && env.SWR_AK != ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install Huawei Cloud SWR SDK
+        if: steps.tags.outputs.swr_enabled == 'true' && env.SWR_AK != ''
+        run: pip install huaweicloudsdkcore huaweicloudsdkswr
+
+      # 将 SWR 仓库设为公开，便于国内免登录拉取（参考 mirror-sync-assistant 的做法）。
+      - name: Set Huawei SWR repository to public
+        if: steps.tags.outputs.swr_enabled == 'true' && env.SWR_AK != ''
+        env:
+          SWR_REPOSITORY: ${{ steps.tags.outputs.swr_repository }}
+        run: |
+          set +e
+          python - <<'PYEOF'
+          import os
+          import sys
+          from huaweicloudsdkcore.auth.credentials import BasicCredentials
+          from huaweicloudsdkcore.exceptions import exceptions
+          from huaweicloudsdkswr.v2 import SwrClient, UpdateRepoRequest, UpdateRepoRequestBody
+          from huaweicloudsdkswr.v2.region.swr_region import SwrRegion
+
+          ak = os.environ.get('SWR_AK')
+          sk = os.environ.get('SWR_SK')
+          region = os.environ.get('SWR_REGION')
+          namespace = os.environ.get('SWR_NAMESPACE')
+          repository = (os.environ.get('SWR_REPOSITORY') or '').replace('/', '$')
+
+          if not all([ak, sk, region, namespace, repository]):
+              print('错误: 缺少必需的环境变量/Secrets')
+              sys.exit(1)
+
+          credentials = BasicCredentials(ak, sk)
+          client = SwrClient.new_builder() \
+              .with_credentials(credentials) \
+              .with_region(SwrRegion.value_of(region)) \
+              .build()
+
+          try:
+              request = UpdateRepoRequest()
+              request.namespace = namespace
+              request.repository = repository
+              request.body = UpdateRepoRequestBody(is_public=True)
+              client.update_repo(request)
+              print(f'OK: 已将仓库 {namespace}/{repository} 设置为公开')
+              sys.exit(0)
+          except exceptions.ClientRequestException as e:
+              print(f'错误: 设置仓库公开失败 status={e.status_code} msg={e.error_msg}')
+              sys.exit(1)
+          PYEOF
+          rc=$?
+          set -e
+          exit $rc
