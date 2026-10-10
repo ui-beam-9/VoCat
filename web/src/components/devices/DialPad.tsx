@@ -46,12 +46,13 @@ export function DialPad({
             type="button"
             disabled={disabled}
             onClick={() => onDigit(item.key)}
-            className="flex h-12 flex-col items-center justify-center rounded-xl border border-gray-200 bg-white text-lg font-medium text-gray-800 transition-colors hover:bg-gray-50 active:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10 dark:active:bg-white/15"
+            className="flex h-12 flex-col items-center justify-center rounded-xl border border-gray-200 bg-white text-gray-800 transition-colors hover:bg-gray-50 active:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10 dark:active:bg-white/15"
           >
-            <span className="leading-none">{item.key}</span>
-            {item.sub ? (
-              <span className="mt-0.5 text-[9px] tracking-[0.15em] text-gray-400">{item.sub}</span>
-            ) : null}
+            {/* 固定两行高度：无字母的键也保留空的第二行，保证所有数字垂直对齐 */}
+            <span className="flex h-5 items-center justify-center text-lg font-medium leading-none">{item.key}</span>
+            <span className="flex h-3 items-center justify-center text-[9px] tracking-[0.15em] text-gray-400">
+              {item.sub ?? ""}
+            </span>
           </button>
         ))}
       </div>
@@ -60,7 +61,7 @@ export function DialPad({
           type="button"
           disabled={disabled}
           onClick={onPlus}
-          className="h-10 rounded-xl border border-gray-200 bg-white text-lg font-medium text-gray-800 transition-colors hover:bg-gray-50 active:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
+          className="inline-flex h-10 items-center justify-center rounded-xl border border-gray-200 bg-white text-lg font-medium text-gray-800 transition-colors hover:bg-gray-50 active:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
         >
           +
         </button>
@@ -68,7 +69,7 @@ export function DialPad({
           type="button"
           disabled={disabled}
           onClick={onBackspace}
-          className="h-10 rounded-xl border border-gray-200 bg-white text-lg font-medium text-gray-800 transition-colors hover:bg-gray-50 active:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
+          className="inline-flex h-10 items-center justify-center rounded-xl border border-gray-200 bg-white text-lg font-medium text-gray-800 transition-colors hover:bg-gray-50 active:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
         >
           ⌫
         </button>
@@ -77,7 +78,7 @@ export function DialPad({
         type="button"
         disabled={callDisabled}
         onClick={onCall}
-        className="mt-2 h-11 w-full rounded-xl border border-transparent bg-[#67c23a] text-sm font-medium text-white transition-colors hover:bg-[#85ce61] active:bg-[#5daf34] disabled:cursor-not-allowed disabled:opacity-60"
+        className="mt-2 inline-flex h-11 w-full items-center justify-center rounded-xl border border-transparent bg-[#67c23a] text-sm font-medium text-white transition-colors hover:bg-[#85ce61] active:bg-[#5daf34] disabled:cursor-not-allowed disabled:opacity-60"
       >
         {callLabel}
       </button>
