@@ -488,6 +488,32 @@ func migrationStatements(version int) []string {
 			`CREATE INDEX automatic_task_runs_task_idx ON automatic_task_runs(task_id, id DESC)`,
 			`CREATE INDEX automatic_task_runs_status_idx ON automatic_task_runs(status, id)`,
 		}
+	case 26:
+		return []string{
+			// VoWiFi 通话记录由服务端持久化，供任意浏览器/设备查看与清空。
+			`CREATE TABLE IF NOT EXISTS call_history (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				device_id TEXT NOT NULL DEFAULT '',
+				number TEXT NOT NULL,
+				direction TEXT NOT NULL CHECK (direction IN ('incoming', 'outgoing')),
+				outcome TEXT NOT NULL CHECK (outcome IN ('answered', 'missed', 'failed')),
+				started_at INTEGER NOT NULL,
+				ended_at INTEGER NOT NULL,
+				duration_seconds INTEGER NOT NULL DEFAULT 0,
+				created_at INTEGER NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS call_history_started_at_idx
+				ON call_history(started_at DESC, id DESC)`,
+			// 本地通讯录（手动保存的联系人），把号码作为唯一键，重复保存时更新姓名。
+			`CREATE TABLE IF NOT EXISTS contacts (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				name TEXT NOT NULL,
+				number TEXT NOT NULL UNIQUE,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS contacts_name_idx ON contacts(name)`,
+		}
 	default:
 		return nil
 	}

@@ -63,6 +63,10 @@ func (s *Server) routeGeneralAPI(w http.ResponseWriter, r *http.Request) bool {
 		s.handleHTTPSCertificate(w, r)
 	case "settings/developer":
 		s.handleDeveloperSettings(w, r)
+	case "call-history":
+		s.handleCallHistory(w, r)
+	case "contacts":
+		s.handleContacts(w, r)
 	default:
 		return false
 	}

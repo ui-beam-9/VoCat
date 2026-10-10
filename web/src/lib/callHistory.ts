@@ -1,11 +1,12 @@
-// 通话记录：仅保存在浏览器本地（localStorage），记录通过本页面发起的通话。
-// 说明：按需求采用前端本地保存；不含其他浏览器/其他客户端发起的通话，清缓存会丢失。
+import { api } from "../api";
+
+// 通话记录（服务端数据库存储）。列表/新增/清空均走 /api/call-history。
 
 export type CallDirection = "incoming" | "outgoing";
 export type CallOutcome = "answered" | "missed" | "failed";
 
 export interface CallHistoryEntry {
-  id: string;
+  id: number;
   deviceId: string;
   number: string;
   direction: CallDirection;
@@ -17,39 +18,33 @@ export interface CallHistoryEntry {
 
 export type NewCallHistoryEntry = Omit<CallHistoryEntry, "id" | "deviceId">;
 
-const STORAGE_KEY = "vocat.callHistory";
-const MAX_ENTRIES = 200;
-
-export function loadCallHistory(): CallHistoryEntry[] {
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as CallHistoryEntry[]) : [];
-  } catch {
-    return [];
-  }
+export async function fetchCallHistory(deviceId?: string): Promise<CallHistoryEntry[]> {
+  const params = new URLSearchParams({ limit: "200" });
+  if (deviceId) params.set("device_id", deviceId);
+  const result = await api<{ entries?: CallHistoryEntry[] }>(`/call-history?${params.toString()}`);
+  return result.entries ?? [];
 }
 
-export function appendCallHistory(entry: CallHistoryEntry): CallHistoryEntry[] {
-  const next = [entry, ...loadCallHistory()].slice(0, MAX_ENTRIES);
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-  } catch {
-    /* 存储不可用时静默忽略 */
-  }
-  return next;
+export async function createCallHistoryEntry(
+  deviceId: string,
+  entry: NewCallHistoryEntry,
+): Promise<CallHistoryEntry> {
+  const result = await api<{ entry: CallHistoryEntry }>("/call-history", {
+    method: "POST",
+    body: {
+      deviceId,
+      number: entry.number,
+      direction: entry.direction,
+      outcome: entry.outcome,
+      startedAt: entry.startedAt,
+      endedAt: entry.endedAt,
+      durationSeconds: entry.durationSeconds,
+    },
+  });
+  return result.entry;
 }
 
-export function clearCallHistory(): CallHistoryEntry[] {
-  try {
-    window.localStorage.removeItem(STORAGE_KEY);
-  } catch {
-    /* ignore */
-  }
-  return [];
-}
-
-export function newCallHistoryId(): string {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+export async function clearCallHistory(deviceId?: string): Promise<void> {
+  const suffix = deviceId ? `?device_id=${encodeURIComponent(deviceId)}` : "";
+  await api(`/call-history${suffix}`, { method: "DELETE" });
 }

@@ -6,17 +6,11 @@ import { DeviceCallPanel } from "../components/devices/DeviceCallPanel";
 import { SaveContactDialog } from "../components/devices/SaveContactDialog";
 import { listContacts } from "../components/sms/smsApi";
 import { cx } from "../lib/utils";
+import { fetchContacts, saveContact, type Contact } from "../lib/contacts";
 import {
-  addLocalContact,
-  loadLocalContacts,
-  newLocalContactId,
-  type LocalContact,
-} from "../lib/localContacts";
-import {
-  appendCallHistory,
   clearCallHistory,
-  loadCallHistory,
-  newCallHistoryId,
+  createCallHistoryEntry,
+  fetchCallHistory,
   type CallHistoryEntry,
   type CallOutcome,
   type NewCallHistoryEntry,
@@ -44,8 +38,8 @@ export default function CallsPage() {
   const [selectedId, setSelectedId] = useState("");
   const [number, setNumber] = useState("");
   const [tab, setTab] = useState<"history" | "contacts">("history");
-  const [history, setHistory] = useState<CallHistoryEntry[]>(() => loadCallHistory());
-  const [localContacts, setLocalContacts] = useState<LocalContact[]>(() => loadLocalContacts());
+  const [history, setHistory] = useState<CallHistoryEntry[]>([]);
+  const [savedContacts, setSavedContacts] = useState<Contact[]>([]);
   const [saveTarget, setSaveTarget] = useState<CallHistoryEntry | null>(null);
   const [contacts, setContacts] = useState<SMSContact[]>([]);
   const [contactsLoading, setContactsLoading] = useState(false);
@@ -82,6 +76,27 @@ export default function CallsPage() {
     [devices, selectedId],
   );
 
+  const refreshHistory = useCallback(async () => {
+    try {
+      setHistory(await fetchCallHistory());
+    } catch (err) {
+      setError(apiMessage(err));
+    }
+  }, []);
+
+  const refreshSavedContacts = useCallback(async () => {
+    try {
+      setSavedContacts(await fetchContacts());
+    } catch {
+      setSavedContacts([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshHistory();
+    void refreshSavedContacts();
+  }, [refreshHistory, refreshSavedContacts]);
+
   const loadContacts = useCallback(async () => {
     if (!selectedId) return;
     setContactsLoading(true);
@@ -99,28 +114,45 @@ export default function CallsPage() {
     void loadContacts();
   }, [tab, loadContacts]);
 
-  const handleCallRecord = useCallback(
-    (entry: NewCallHistoryEntry) => {
-      setHistory(appendCallHistory({ ...entry, id: newCallHistoryId(), deviceId: selectedId }));
-    },
-    [selectedId],
-  );
-
   const outcomeLabel = useCallback(
     (outcome: CallOutcome) =>
       outcome === "answered" ? t("已接通") : outcome === "missed" ? t("未接") : t("呼叫失败"),
     [t],
   );
 
-  const handleSaveContact = useCallback(
-    (name: string, number: string) => {
-      setLocalContacts(
-        addLocalContact({ id: newLocalContactId(), name, number, createdAt: new Date().toISOString() }),
-      );
-      setSaveTarget(null);
-      message.success(t("已保存为联系人"));
+  const handleCallRecord = useCallback(
+    async (entry: NewCallHistoryEntry) => {
+      try {
+        await createCallHistoryEntry(selectedId, entry);
+        await refreshHistory();
+      } catch {
+        /* 记录失败不影响通话流程 */
+      }
     },
-    [t],
+    [selectedId, refreshHistory],
+  );
+
+  const handleClearHistory = useCallback(async () => {
+    try {
+      await clearCallHistory();
+      setHistory([]);
+    } catch (err) {
+      message.error(apiMessage(err));
+    }
+  }, []);
+
+  const handleSaveContact = useCallback(
+    async (name: string, number: string) => {
+      try {
+        await saveContact(name, number);
+        setSaveTarget(null);
+        await refreshSavedContacts();
+        message.success(t("已保存为联系人"));
+      } catch (err) {
+        message.error(apiMessage(err));
+      }
+    },
+    [refreshSavedContacts, t],
   );
 
   return (
@@ -202,7 +234,7 @@ export default function CallsPage() {
                   <Button
                     size="small"
                     disabled={history.length === 0}
-                    onClick={() => setHistory(clearCallHistory())}
+                    onClick={() => void handleClearHistory()}
                   >
                     {t("清空")}
                   </Button>
@@ -254,13 +286,13 @@ export default function CallsPage() {
                     ))}
                   </div>
                 )
-              ) : localContacts.length === 0 && contacts.length === 0 ? (
+              ) : savedContacts.length === 0 && contacts.length === 0 ? (
                 <div className="py-6 text-center text-sm text-gray-400">
                   {contactsLoading ? t("加载中...") : t("暂无联系人")}
                 </div>
               ) : (
                 <div className="space-y-1">
-                  {localContacts.map((contact) => (
+                  {savedContacts.map((contact) => (
                     <button
                       key={contact.id}
                       type="button"

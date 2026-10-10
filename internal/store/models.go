@@ -231,6 +231,30 @@ type SMSContact struct {
 	MessageCount  int
 }
 
+// CallHistoryEntry is one finished VoWiFi call persisted for the history view.
+// Direction is incoming/outgoing; Outcome is answered/missed/failed.
+type CallHistoryEntry struct {
+	ID              int64
+	DeviceID        string
+	Number          string
+	Direction       string
+	Outcome         string
+	StartedAt       time.Time
+	EndedAt         time.Time
+	DurationSeconds int
+	CreatedAt       time.Time
+}
+
+// Contact is a manually saved phone number (the local address book). The
+// number is unique: saving the same number again updates its name.
+type Contact struct {
+	ID        int64
+	Name      string
+	Number    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 type LocalProxyConfig struct {
 	ID          string
 	Name        string
