@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button, Input, StatusDot } from "../ui";
+import { Button, Input, Select, StatusDot } from "../ui";
 import { cx } from "../../lib/utils";
 import { tf, useI18n } from "../../lib/i18n";
 import { apiMessage } from "../../api";
@@ -12,7 +12,17 @@ import {
   type CallState,
   type VoWiFiCall,
 } from "./callApi";
-import { callAudioDiagnostics, CallAudioSession, type CallAudioState } from "../../lib/callAudio";
+import {
+  audioOutputSelectionSupported,
+  callAudioDiagnostics,
+  CallAudioSession,
+  listAudioDevices,
+  measureMicLevel,
+  mediaErrorMessage,
+  playTestTone,
+  type AudioDeviceInfo,
+  type CallAudioState,
+} from "../../lib/callAudio";
 import { DialPad } from "./DialPad";
 
 const POLL_INTERVAL_MS = 2000;
@@ -61,9 +71,19 @@ export function DeviceCallPanel({
   const [audioState, setAudioState] = useState<CallAudioState | "idle">("idle");
   const [internalNumber, setInternalNumber] = useState("");
   const [busy, setBusy] = useState(false);
+  // 音频诊断：设备选择与测试状态
+  const [inputDevices, setInputDevices] = useState<AudioDeviceInfo[]>([]);
+  const [outputDevices, setOutputDevices] = useState<AudioDeviceInfo[]>([]);
+  const [selectedInput, setSelectedInput] = useState("");
+  const [selectedOutput, setSelectedOutput] = useState("");
+  const [diagTesting, setDiagTesting] = useState(false);
+  const [diagPhase, setDiagPhase] = useState<"idle" | "tone" | "mic" | "done" | "fail">("idle");
+  const [diagLevel, setDiagLevel] = useState(0);
+  const [diagResult, setDiagResult] = useState("");
 
   const sessionRef = useRef<CallAudioSession | null>(null);
   const sessionCallIdRef = useRef<string>("");
+  const routeRef = useRef<{ inputDeviceId?: string; outputDeviceId?: string }>({});
 
   const deviceId = device.id;
   const number = numberProp ?? internalNumber;
@@ -76,6 +96,7 @@ export function DeviceCallPanel({
   );
   const voWiFiReady = transport === "vowifi";
   const audioDiag = useMemo(() => callAudioDiagnostics(), []);
+  const outputSelectionSupported = useMemo(() => audioOutputSelectionSupported(), []);
   const [diagOpen, setDiagOpen] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -91,6 +112,62 @@ export function DeviceCallPanel({
       setLoaded(true);
     }
   }, [deviceId]);
+
+  const refreshDevices = useCallback(async () => {
+    try {
+      const lists = await listAudioDevices();
+      setInputDevices(lists.inputs);
+      setOutputDevices(lists.outputs);
+    } catch {
+      /* 忽略：部分浏览器枚举设备失败 */
+    }
+  }, []);
+
+  const runAudioTest = useCallback(async () => {
+    if (!audioDiag.supported) return;
+    setDiagTesting(true);
+    setDiagLevel(0);
+    setDiagResult("");
+    try {
+      // 第一步：播放测试音，走所选播放设备。
+      setDiagPhase("tone");
+      await playTestTone(selectedOutput || undefined);
+      // 第二步：麦克风测试，需要用户说话并被检测到才算成功。
+      setDiagPhase("mic");
+      const result = await measureMicLevel({
+        deviceId: selectedInput || undefined,
+        durationMs: 4000,
+        onLevel: (level) => setDiagLevel(level),
+      });
+      await refreshDevices();
+      if (result.detected) {
+        setDiagPhase("done");
+        setDiagResult(t("测试成功：已检测到麦克风声音"));
+      } else {
+        setDiagPhase("fail");
+        setDiagResult(t("测试失败：未检测到麦克风声音，请对着麦克风说话后重试"));
+      }
+    } catch (err) {
+      setDiagPhase("fail");
+      setDiagResult(mediaErrorMessage(err));
+    } finally {
+      setDiagTesting(false);
+      setDiagLevel(0);
+    }
+  }, [audioDiag.supported, selectedInput, selectedOutput, refreshDevices, t]);
+
+  // 所选音频设备在通话建立时读取（存 ref，避免切换设备导致进行中的通话音频重建）。
+  useEffect(() => {
+    routeRef.current = {
+      inputDeviceId: selectedInput || undefined,
+      outputDeviceId: selectedOutput || undefined,
+    };
+  }, [selectedInput, selectedOutput]);
+
+  // 打开诊断面板时枚举一次设备（未授权时 label 可能为空）。
+  useEffect(() => {
+    if (diagOpen) void refreshDevices();
+  }, [diagOpen, refreshDevices]);
 
   // 轮询通话状态；页面隐藏时暂停，避免无谓请求。
   useEffect(() => {
@@ -135,12 +212,17 @@ export function DeviceCallPanel({
       sessionRef.current = null;
       setMediaError("");
       setAudioState("connecting");
-      const session = new CallAudioSession(deviceId, activeCall.id, {
-        onState: (state, detail) => {
-          setAudioState(state);
-          if (state === "error") setMediaError(detail || t("音频连接失败"));
+      const session = new CallAudioSession(
+        deviceId,
+        activeCall.id,
+        {
+          onState: (state, detail) => {
+            setAudioState(state);
+            if (state === "error") setMediaError(detail || t("音频连接失败"));
+          },
         },
-      });
+        routeRef.current,
+      );
       sessionRef.current = session;
       sessionCallIdRef.current = activeCall.id;
       session.start().catch((err) => {
@@ -267,7 +349,7 @@ export function DeviceCallPanel({
       </div>
 
       {diagOpen ? (
-        <div className="mb-3 space-y-1 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300">
+        <div className="mb-3 space-y-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300">
           <div>
             {t("访问地址")}：<span className="font-mono">{audioDiag.origin || "-"}</span>
           </div>
@@ -280,6 +362,66 @@ export function DeviceCallPanel({
           <div className={audioDiag.supported ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"}>
             {audioDiag.supported ? t("网页音频可用") : audioReasonText}
           </div>
+          {audioDiag.supported ? (
+            <div className="space-y-2 pt-1">
+              <div>
+                <div className="mb-1 text-gray-500 dark:text-gray-400">{t("播放设备")}</div>
+                <Select
+                  value={selectedOutput}
+                  onChange={setSelectedOutput}
+                  disabled={!outputSelectionSupported || diagTesting}
+                  options={[
+                    { value: "", label: t("系统默认") },
+                    ...outputDevices.map((device, index) => ({
+                      value: device.deviceId,
+                      label: device.label || `#${index + 1}`,
+                    })),
+                  ]}
+                />
+                {!outputSelectionSupported ? (
+                  <div className="mt-1 text-amber-600 dark:text-amber-400">
+                    {t("当前浏览器不支持选择播放设备，将使用系统默认输出")}
+                  </div>
+                ) : null}
+              </div>
+              <div>
+                <div className="mb-1 text-gray-500 dark:text-gray-400">{t("麦克风设备")}</div>
+                <Select
+                  value={selectedInput}
+                  onChange={setSelectedInput}
+                  disabled={diagTesting}
+                  options={[
+                    { value: "", label: t("系统默认") },
+                    ...inputDevices.map((device, index) => ({
+                      value: device.deviceId,
+                      label: device.label || `#${index + 1}`,
+                    })),
+                  ]}
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <Button size="small" disabled={diagTesting} onClick={() => void runAudioTest()}>
+                  {diagTesting ? t("测试中…") : t("测试音频")}
+                </Button>
+                {diagPhase === "tone" ? <span>{t("正在播放测试音…")}</span> : null}
+                {diagPhase === "mic" ? <span>{t("请对着麦克风说话…")}</span> : null}
+              </div>
+              {diagTesting ? (
+                <div className="h-2 w-full overflow-hidden rounded bg-gray-200 dark:bg-white/10">
+                  <div
+                    className="h-full bg-emerald-500 transition-[width] duration-75"
+                    style={{ width: `${Math.min(100, Math.round(diagLevel * 500))}%` }}
+                  />
+                </div>
+              ) : null}
+              {diagPhase === "done" && diagResult ? (
+                <div className="text-emerald-600 dark:text-emerald-400">{diagResult}</div>
+              ) : null}
+              {diagPhase === "fail" && diagResult ? (
+                <div className="text-red-600 dark:text-red-400">{diagResult}</div>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       ) : null}
 

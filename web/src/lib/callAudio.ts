@@ -13,98 +13,11 @@ export interface CallAudioEvents {
 }
 
 const TARGET_SAMPLE_RATE = 8000;
-const FRAME_SAMPLES = 160; // 20ms @ 8kHz
 
-// AudioWorklet 模块以 Blob URL 注入，避免额外的构建资源与路由。
-const WORKLET_SOURCE = `
-class CaptureProcessor extends AudioWorkletProcessor {
-  constructor() {
-    super();
-    this.ratio = sampleRate / ${TARGET_SAMPLE_RATE};
-    this.inBuf = new Float32Array(0);
-    this.pos = 0;
-    this.frame = new Float32Array(${FRAME_SAMPLES});
-    this.frameLen = 0;
-  }
-  drain() {
-    while (this.pos + 1 < this.inBuf.length) {
-      const i = Math.floor(this.pos);
-      const frac = this.pos - i;
-      this.frame[this.frameLen++] = this.inBuf[i] * (1 - frac) + this.inBuf[i + 1] * frac;
-      this.pos += this.ratio;
-      if (this.frameLen === ${FRAME_SAMPLES}) {
-        const pcm = new Int16Array(${FRAME_SAMPLES});
-        for (let k = 0; k < pcm.length; k++) {
-          const v = Math.max(-1, Math.min(1, this.frame[k]));
-          pcm[k] = v < 0 ? Math.round(v * 0x8000) : Math.round(v * 0x7fff);
-        }
-        this.port.postMessage(pcm.buffer, [pcm.buffer]);
-        this.frameLen = 0;
-      }
-    }
-    const consumed = Math.floor(this.pos);
-    if (consumed > 0) {
-      this.inBuf = this.inBuf.slice(consumed);
-      this.pos -= consumed;
-    }
-  }
-  process(inputs) {
-    const input = inputs[0];
-    if (input && input[0]) {
-      const ch = input[0];
-      const merged = new Float32Array(this.inBuf.length + ch.length);
-      merged.set(this.inBuf, 0);
-      merged.set(ch, this.inBuf.length);
-      this.inBuf = merged;
-      this.drain();
-    }
-    return true;
-  }
-}
-registerProcessor('vocat-capture', CaptureProcessor);
-
-class PlaybackProcessor extends AudioWorkletProcessor {
-  constructor() {
-    super();
-    this.step = ${TARGET_SAMPLE_RATE} / sampleRate;
-    this.buf = new Float32Array(0);
-    this.pos = 0;
-    this.maxBuf = ${TARGET_SAMPLE_RATE} * 3;
-    this.port.onmessage = (event) => {
-      const src = new Int16Array(event.data);
-      const f = new Float32Array(src.length);
-      for (let i = 0; i < src.length; i++) f[i] = src[i] / 0x8000;
-      const merged = new Float32Array(this.buf.length + f.length);
-      merged.set(this.buf, 0);
-      merged.set(f, this.buf.length);
-      // 缓冲过大说明播放滞后，丢弃最旧数据以压低延迟。
-      this.buf = merged.length > this.maxBuf ? merged.slice(merged.length - this.maxBuf) : merged;
-      if (this.pos > this.buf.length) this.pos = 0;
-    };
-  }
-  process(_inputs, outputs) {
-    const out = outputs[0][0];
-    if (!out) return true;
-    for (let i = 0; i < out.length; i++) {
-      if (this.pos + 1 < this.buf.length) {
-        const j = Math.floor(this.pos);
-        const frac = this.pos - j;
-        out[i] = this.buf[j] * (1 - frac) + this.buf[j + 1] * frac;
-        this.pos += this.step;
-      } else {
-        out[i] = 0;
-      }
-    }
-    const consumed = Math.floor(this.pos);
-    if (consumed > 0) {
-      this.buf = this.buf.slice(consumed);
-      this.pos -= consumed;
-    }
-    return true;
-  }
-}
-registerProcessor('vocat-playback', PlaybackProcessor);
-`;
+// Worklet 处理代码是同源静态文件（web/public/call-worklet.js），随构建产物发布。
+// 必须同源加载：服务端 CSP 为 script-src 'self'，用 Blob URL 会被拦截导致
+// "Failed to load worklet module script"。
+const WORKLET_URL = "/call-worklet.js";
 
 // getUserMedia 只在安全上下文（HTTPS / localhost）暴露；HTTP 内网访问时
 // navigator.mediaDevices 为 undefined，直接调用会抛出 "Cannot read properties of undefined"。
@@ -155,7 +68,7 @@ export function callAudioUnsupportedReason(): string {
 }
 
 // 把浏览器的媒体错误翻译为可读提示。
-function mediaErrorMessage(error: unknown): string {
+export function mediaErrorMessage(error: unknown): string {
   if (typeof DOMException !== "undefined" && error instanceof DOMException) {
     switch (error.name) {
       case "NotAllowedError":
@@ -203,19 +116,157 @@ export function callMediaURL(deviceId: string, callId: string): string {
   return `${scheme}://${window.location.host}/api/devices/${encodeURIComponent(deviceId)}/calls/media?${params.toString()}`;
 }
 
-// 返回 worklet 模块的 blob URL，由调用方在会话结束（AudioContext 关闭）后撤销。
-// AudioWorklet 在音频线程异步拉取脚本，addModule 的 Promise 返回与脚本真正加载完成
-// 存在竞态；若在此处立即撤销 URL，会导致 "Failed to load worklet module script"。
-async function loadWorkletModule(ctx: AudioContext): Promise<string> {
-  const blob = new Blob([WORKLET_SOURCE], { type: "application/javascript" });
-  const url = URL.createObjectURL(blob);
+// 加载同源 worklet 模块。
+async function loadWorkletModule(ctx: AudioContext): Promise<void> {
+  await ctx.audioWorklet.addModule(WORKLET_URL);
+}
+
+function audioContextCtor(): (new (options?: AudioContextOptions) => AudioContext) | undefined {
+  return (
+    window.AudioContext ??
+    (window as unknown as { webkitAudioContext?: new (options?: AudioContextOptions) => AudioContext }).webkitAudioContext
+  );
+}
+
+// 把播放输出路由到指定设备（AudioContext.setSinkId，Chrome 110+）。
+// 浏览器不支持或设备不可用时静默忽略，保持默认输出。
+async function applySinkId(ctx: AudioContext, sinkId?: string): Promise<void> {
+  if (!sinkId) return;
+  const target = ctx as AudioContext & { setSinkId?: (id: string) => Promise<void> };
+  if (typeof target.setSinkId !== "function") return;
   try {
-    await ctx.audioWorklet.addModule(url);
-  } catch (error) {
-    URL.revokeObjectURL(url);
-    throw error;
+    await target.setSinkId(sinkId);
+  } catch {
+    /* 忽略：浏览器或系统未提供该输出设备 */
   }
-  return url;
+}
+
+// 是否支持在网页里选择播放设备。
+export function audioOutputSelectionSupported(): boolean {
+  if (typeof window === "undefined") return false;
+  const Ctor = audioContextCtor();
+  return !!Ctor && typeof (Ctor.prototype as { setSinkId?: unknown }).setSinkId === "function";
+}
+
+export interface AudioDeviceInfo {
+  deviceId: string;
+  label: string;
+}
+
+export interface AudioDeviceLists {
+  inputs: AudioDeviceInfo[];
+  outputs: AudioDeviceInfo[];
+}
+
+// 枚举音频输入/输出设备。未授权时 label 可能为空字符串。
+export async function listAudioDevices(): Promise<AudioDeviceLists> {
+  if (typeof navigator === "undefined" || !navigator.mediaDevices?.enumerateDevices) {
+    return { inputs: [], outputs: [] };
+  }
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const inputs: AudioDeviceInfo[] = [];
+  const outputs: AudioDeviceInfo[] = [];
+  for (const device of devices) {
+    if (device.kind === "audioinput") {
+      inputs.push({ deviceId: device.deviceId, label: device.label });
+    } else if (device.kind === "audiooutput") {
+      outputs.push({ deviceId: device.deviceId, label: device.label });
+    }
+  }
+  return { inputs, outputs };
+}
+
+// 播放一段测试音（880Hz 短音），走所选播放设备。
+export async function playTestTone(sinkId?: string): Promise<void> {
+  const Ctor = audioContextCtor();
+  if (!Ctor) throw new Error("当前浏览器不支持 Web Audio");
+  const ctx = new Ctor();
+  try {
+    await applySinkId(ctx, sinkId);
+    if (ctx.state === "suspended") await ctx.resume();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = 880;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    const start = ctx.currentTime;
+    // 淡入淡出，避免爆音。
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.exponentialRampToValueAtTime(0.25, start + 0.05);
+    gain.gain.setValueAtTime(0.25, start + 0.45);
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.55);
+    osc.start(start);
+    osc.stop(start + 0.6);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+  } finally {
+    if (ctx.state !== "closed") void ctx.close();
+  }
+}
+
+export interface MicLevelOptions {
+  deviceId?: string;
+  durationMs?: number;
+  threshold?: number;
+  onLevel?: (level: number) => void;
+}
+
+export interface MicLevelResult {
+  detected: boolean;
+  peak: number;
+}
+
+// 采集麦克风电平：在 durationMs 内持续测量 RMS，任一时刻超过阈值即视为"检测到说话声"。
+export async function measureMicLevel(options: MicLevelOptions = {}): Promise<MicLevelResult> {
+  const { deviceId, durationMs = 4000, threshold = 0.015, onLevel } = options;
+  if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+    throw new Error(callAudioUnsupportedReason() || "浏览器不支持麦克风采集");
+  }
+  const audio: MediaTrackConstraints = {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  };
+  if (deviceId) audio.deviceId = { exact: deviceId };
+  const stream = await navigator.mediaDevices.getUserMedia({ audio });
+  const Ctor = audioContextCtor();
+  if (!Ctor) {
+    stream.getTracks().forEach((track) => track.stop());
+    throw new Error("当前浏览器不支持 Web Audio");
+  }
+  const ctx = new Ctor();
+  try {
+    if (ctx.state === "suspended") await ctx.resume();
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    source.connect(analyser);
+    const buffer = new Float32Array(analyser.fftSize);
+    const deadline = performance.now() + durationMs;
+    let peak = 0;
+    let detected = false;
+    while (performance.now() < deadline) {
+      analyser.getFloatTimeDomainData(buffer);
+      let sum = 0;
+      for (let index = 0; index < buffer.length; index++) {
+        sum += buffer[index] * buffer[index];
+      }
+      const rms = Math.sqrt(sum / buffer.length);
+      if (rms > peak) peak = rms;
+      onLevel?.(rms);
+      if (rms >= threshold) detected = true;
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    }
+    return { detected, peak };
+  } finally {
+    stream.getTracks().forEach((track) => track.stop());
+    if (ctx.state !== "closed") void ctx.close();
+  }
+}
+
+export interface CallAudioRouteOptions {
+  inputDeviceId?: string;
+  outputDeviceId?: string;
 }
 
 // 一次通话对应的音频会话：麦克风采集 + 扬声器播放 + WebSocket 传输。
@@ -228,12 +279,12 @@ export class CallAudioSession {
   private playbackNode?: AudioWorkletNode;
   private closed = false;
   private wsFailed = false;
-  private workletURL?: string;
 
   constructor(
     private readonly deviceId: string,
     private readonly callId: string,
     private readonly events: CallAudioEvents = {},
+    private readonly route: CallAudioRouteOptions = {},
   ) {}
 
   async start(): Promise<void> {
@@ -245,11 +296,15 @@ export class CallAudioSession {
     }
     try {
       // 先申请麦克风权限，便于尽早抛出明确的授权错误。
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
+      const audio: MediaTrackConstraints = {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      };
+      if (this.route.inputDeviceId) audio.deviceId = { exact: this.route.inputDeviceId };
+      this.stream = await navigator.mediaDevices.getUserMedia({ audio });
 
-      const Ctor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      const Ctor = audioContextCtor();
       if (!Ctor) throw new Error("当前浏览器不支持 Web Audio");
       let ctx: AudioContext;
       try {
@@ -259,7 +314,8 @@ export class CallAudioSession {
         ctx = new Ctor();
       }
       this.ctx = ctx;
-      this.workletURL = await loadWorkletModule(ctx);
+      await applySinkId(ctx, this.route.outputDeviceId);
+      await loadWorkletModule(ctx);
 
       const capture = new AudioWorkletNode(ctx, "vocat-capture");
       const playback = new AudioWorkletNode(ctx, "vocat-playback", {
@@ -337,10 +393,6 @@ export class CallAudioSession {
       /* ignore */
     }
     this.stream?.getTracks().forEach((track) => track.stop());
-    if (this.workletURL) {
-      URL.revokeObjectURL(this.workletURL);
-      this.workletURL = undefined;
-    }
     if (this.ctx && this.ctx.state !== "closed") void this.ctx.close();
     this.events.onState?.("closed");
   }
