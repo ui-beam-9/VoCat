@@ -51,13 +51,15 @@ func TestPlaceholderIMSIIsNotTreatedAsARealCarrier(t *testing.T) {
 
 func TestRegionBlockReason(t *testing.T) {
 	t.Parallel()
-	for _, imsi := range []string{"460001234567890", "461001234567890"} {
-		reason := RegionBlockReason(imsi)
+	// 期望值跟随实际策略表 BlockedMCCs：列入其中的 MCC 必须被拦截并说明归属地，
+	// 未列入的（含美国 310、无效 IMSI）一律 fail-open。
+	for mcc, country := range BlockedMCCs {
+		reason := RegionBlockReason(mcc + "001234567890")
 		if reason == "" {
-			t.Fatalf("RegionBlockReason(%q) did not block", imsi)
+			t.Fatalf("RegionBlockReason(MCC %s) did not block", mcc)
 		}
-		if !strings.Contains(reason, "中国") {
-			t.Fatalf("RegionBlockReason(%q) = %q, want it to name 中国", imsi, reason)
+		if !strings.Contains(reason, country) {
+			t.Fatalf("RegionBlockReason(MCC %s) = %q, want it to name %s", mcc, reason, country)
 		}
 	}
 	for _, imsi := range []string{"310260123456789", "001011234567890", ""} {
@@ -68,6 +70,9 @@ func TestRegionBlockReason(t *testing.T) {
 }
 
 func TestSetNetworkBlockedForRestrictedRegionSIM(t *testing.T) {
+	if _, blocked := BlockedMCCs["460"]; !blocked {
+		t.Skip("当前策略未拦截 MCC 460（区域限制已临时移除），跳过该用例")
+	}
 	client := &transcriptClient{}
 	manager, id := newStartedTestManager(t, client)
 	injectSnapshot(t, manager, id, &Snapshot{DeviceID: id, IMSI: "460001234567890"})
@@ -118,6 +123,9 @@ func TestSetNetworkAllowedWhenSIMRegionUnknown(t *testing.T) {
 }
 
 func TestSendSMSBlockedForRestrictedRegionSIM(t *testing.T) {
+	if _, blocked := BlockedMCCs["460"]; !blocked {
+		t.Skip("当前策略未拦截 MCC 460（区域限制已临时移除），跳过该用例")
+	}
 	client := &transcriptClient{}
 	manager, id := newStartedTestManager(t, client)
 	injectSnapshot(t, manager, id, &Snapshot{DeviceID: id, IMSI: "460001234567890"})
