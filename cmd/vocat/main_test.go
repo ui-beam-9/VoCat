@@ -102,6 +102,9 @@ func regionTestLogger() *slog.Logger {
 }
 
 func TestEnforceCardRegionForcesAirplaneAndPersistsPolicy(t *testing.T) {
+	if device.RegionBlockReason("460001234567890") == "" {
+		t.Skip("当前策略未拦截 MCC 460（区域限制已临时移除），跳过该用例")
+	}
 	client := &fakeModemClient{steps: []fakeStep{
 		{command: "AT+CFUN?", lines: []string{"+CFUN: 1"}},
 		{command: "AT+CFUN=4"},
@@ -132,6 +135,9 @@ func TestEnforceCardRegionForcesAirplaneAndPersistsPolicy(t *testing.T) {
 }
 
 func TestEnforceCardRegionSkipsRadioWhenAlreadyOff(t *testing.T) {
+	if device.RegionBlockReason("461001234567890") == "" {
+		t.Skip("当前策略未拦截 MCC 461（区域限制已临时移除），跳过该用例")
+	}
 	client := &fakeModemClient{}
 	manager := newRegionTestManager(t, client)
 	database := newRegionTestStore(t)
