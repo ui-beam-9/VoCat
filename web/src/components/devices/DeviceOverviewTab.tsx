@@ -4,7 +4,6 @@ import { CellLockDialog } from "./CellLockDialog";
 import { useDeviceCellLock } from "./useDeviceCellLock";
 import { OverviewNetworkCard } from "./OverviewNetworkCard";
 import { OverviewVowifiCard } from "./OverviewVowifiCard";
-import { DeviceCallPanel } from "./DeviceCallPanel";
 import { OverviewSimPanel } from "./OverviewSimPanel";
 import { OverviewNetworkPanel } from "./OverviewNetworkPanel";
 import { OverviewTrafficChart } from "./OverviewTrafficChart";
@@ -65,7 +64,6 @@ export function DeviceOverviewTab(props: DeviceOverviewTabProps) {
           trafficSpeedTx={props.trafficSpeedTx}
 		/> : null}
       </div>
-      {isVoWiFiInUse(device) && device.id ? <DeviceCallPanel device={device} /> : null}
       {device.developerEnabled && device.networkEnabled && device.id ? <OverviewTrafficChart deviceId={device.id} /> : null}
 	  {device?.id && !wifiCallingOnly ? (
         <OperatorSelectionDialog
