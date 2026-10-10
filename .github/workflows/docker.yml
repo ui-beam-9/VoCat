@@ -159,6 +159,11 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          # 关闭 provenance/SBOM 证明清单：buildx 默认会额外推送 attestation
+          # 清单，形成带 unknown/unknown 平台的 OCI index，华为云 SWR 无法解析
+          # （报 fail to parse 'manifest.json'）。
+          provenance: false
+          sbom: false
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
             BUILD_TIME=${{ steps.version.outputs.build_time }}
