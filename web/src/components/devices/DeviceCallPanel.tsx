@@ -12,7 +12,7 @@ import {
   type CallState,
   type VoWiFiCall,
 } from "./callApi";
-import { callAudioSupported, callAudioUnsupportedReason, CallAudioSession, type CallAudioState } from "../../lib/callAudio";
+import { callAudioDiagnostics, CallAudioSession, type CallAudioState } from "../../lib/callAudio";
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -55,7 +55,8 @@ export function DeviceCallPanel({ device }: { device: { id: string } }) {
 
   const deviceId = device.id;
   const voWiFiReady = transport === "vowifi";
-  const audioSupported = callAudioSupported();
+  const audioDiag = useMemo(() => callAudioDiagnostics(), []);
+  const [diagOpen, setDiagOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     if (!deviceId) return;
@@ -215,20 +216,56 @@ export function DeviceCallPanel({ device }: { device: { id: string } }) {
         : audioState === "error"
           ? t("音频连接失败")
           : t("未在通话");
+  const audioReasonText =
+    audioDiag.issue === "insecure_context"
+      ? tf("当前以 {origin} 访问，不是安全上下文；浏览器只在 HTTPS 或 localhost 下提供麦克风/扬声器", {
+          origin: audioDiag.origin || "http://...",
+        })
+      : audioDiag.issue === "no_media_devices"
+        ? t("浏览器未提供 navigator.mediaDevices 接口")
+        : audioDiag.issue === "no_get_user_media"
+          ? t("浏览器未提供 getUserMedia 接口")
+          : "";
 
   return (
     <div className="ui-panel-muted p-4">
       <div className="mb-3 flex items-center justify-between">
         <div className="text-xs font-bold uppercase tracking-wider text-gray-500">{t("语音通话")}</div>
-        <div className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
-          <StatusDot tone={audioTone} size="sm" animated={audioState === "connecting"} />
-          {audioLabel}
+        <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+          <span className="flex items-center gap-1.5">
+            <StatusDot tone={audioTone} size="sm" animated={audioState === "connecting"} />
+            {audioLabel}
+          </span>
+          <button
+            type="button"
+            onClick={() => setDiagOpen((value) => !value)}
+            className="rounded px-1 text-[#0ea5e9] transition-colors hover:bg-black/5 dark:hover:bg-white/10"
+          >
+            {t("音频诊断")}
+          </button>
         </div>
       </div>
 
-      {!audioSupported ? (
+      {diagOpen ? (
+        <div className="mb-3 space-y-1 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300">
+          <div>
+            {t("访问地址")}：<span className="font-mono">{audioDiag.origin || "-"}</span>
+          </div>
+          <div>
+            {t("安全上下文")}：{audioDiag.secureContext ? t("是") : t("否")}
+          </div>
+          <div>
+            {t("麦克风接口")}：{audioDiag.hasGetUserMedia ? t("可用") : t("不可用")}
+          </div>
+          <div className={audioDiag.supported ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"}>
+            {audioDiag.supported ? t("网页音频可用") : audioReasonText}
+          </div>
+        </div>
+      ) : null}
+
+      {!audioDiag.supported ? (
         <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-200">
-          {tf("网页音频不可用：{reason}。拨号信令仍可用，但无法进行语音通话，请改用 HTTPS 或 localhost 访问。", { reason: callAudioUnsupportedReason() })}
+          {tf("网页音频不可用：{reason}。拨号信令仍可用，但无法进行语音通话。", { reason: audioReasonText })}
         </div>
       ) : null}
 

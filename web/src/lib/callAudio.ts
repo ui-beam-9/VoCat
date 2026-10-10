@@ -112,11 +112,46 @@ export function callAudioSupported(): boolean {
   return typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
 }
 
-export function callAudioUnsupportedReason(): string {
-  if (typeof window !== "undefined" && !window.isSecureContext) {
-    return "当前页面不是安全上下文（需 HTTPS 或 localhost），浏览器不会提供麦克风/扬声器";
+// 音频环境诊断：用于区分"内网 IP / HTTP 非安全上下文"与"浏览器不支持"等不同原因。
+export type CallAudioIssue = "" | "insecure_context" | "no_media_devices" | "no_get_user_media";
+
+export interface CallAudioDiagnostics {
+  supported: boolean;
+  secureContext: boolean;
+  hasMediaDevices: boolean;
+  hasGetUserMedia: boolean;
+  origin: string;
+  issue: CallAudioIssue;
+}
+
+export function callAudioDiagnostics(): CallAudioDiagnostics {
+  const win = typeof window !== "undefined" ? window : undefined;
+  const nav = typeof navigator !== "undefined" ? navigator : undefined;
+  const secureContext = !!win?.isSecureContext;
+  const hasMediaDevices = !!nav?.mediaDevices;
+  const hasGetUserMedia = !!nav?.mediaDevices?.getUserMedia;
+  const origin = win?.location?.origin ?? "";
+  let issue: CallAudioIssue = "";
+  if (!hasGetUserMedia) {
+    if (!secureContext) issue = "insecure_context";
+    else if (!hasMediaDevices) issue = "no_media_devices";
+    else issue = "no_get_user_media";
   }
-  return "当前浏览器不支持网页音频（getUserMedia 不可用）";
+  return { supported: hasGetUserMedia, secureContext, hasMediaDevices, hasGetUserMedia, origin, issue };
+}
+
+export function callAudioUnsupportedReason(): string {
+  const diag = callAudioDiagnostics();
+  switch (diag.issue) {
+    case "insecure_context":
+      return `当前以 ${diag.origin || "http 地址"} 访问，不是安全上下文；浏览器只在 HTTPS 或 localhost 下提供麦克风/扬声器`;
+    case "no_media_devices":
+      return "浏览器未提供 navigator.mediaDevices 接口";
+    case "no_get_user_media":
+      return "浏览器未提供 getUserMedia 接口";
+    default:
+      return "";
+  }
 }
 
 // 把浏览器的媒体错误翻译为可读提示。
