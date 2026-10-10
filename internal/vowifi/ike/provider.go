@@ -541,6 +541,10 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 	if err != nil {
 		return nil, err
 	}
+	provider.config.Logger.Info("IKE CHILD_SA traffic selectors negotiated",
+		"initiator", trafficSelectorSummary(initiatorSelectors),
+		"responder", trafficSelectorSummary(responderSelectors),
+	)
 	cpPayload, err := onePayload(finalPayloads, payloadCP)
 	if err != nil {
 		return nil, err
@@ -992,6 +996,16 @@ func ipStrings(ips []net.IP) []string {
 		}
 	}
 	return result
+}
+
+// trafficSelectorSummary 把协商到的流量选择器渲染成 "起始-结束" 便于日志排查
+// （用于确认 RTP 媒体目的地址是否落在隧道选择器范围内）。
+func trafficSelectorSummary(selectors []trafficSelector) string {
+	parts := make([]string, 0, len(selectors))
+	for _, selector := range selectors {
+		parts = append(parts, fmt.Sprintf("%s-%s", ipString(selector.StartIP), ipString(selector.EndIP)))
+	}
+	return strings.Join(parts, ",")
 }
 
 func pcscfForAssignedFamilies(ips []net.IP, hasIPv4 bool, hasIPv6 bool) []net.IP {

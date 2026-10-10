@@ -428,19 +428,26 @@ func (handle *linuxUserspaceHandle) configureFamily(
 		"lookup", tableValue,
 	)
 
-	unreachableArguments := []string{
+	// 内网地址专用于 IMS 通信，默认路由直接指向隧道：除 P-CSCF 信令外，
+	// 去往 IMS 媒体网关（AGW）的 RTP 媒体也必须进入隧道，否则通话无声音。
+	// 默认走隧道同样不会把内网源流量泄漏到主路由表。
+	defaultRouteArguments := []string{
 		family, "route", "add",
 		"table", tableValue,
-		"unreachable", "default",
+		"default",
+		"dev", handle.config.Name,
+		"src", local.String(),
 	}
-	if err := handle.run(ctx, "install fail-closed route", unreachableArguments...); err != nil {
+	if err := handle.run(ctx, "install tunnel default route", defaultRouteArguments...); err != nil {
 		return err
 	}
 	handle.recordCleanup(
-		"remove fail-closed route",
+		"remove tunnel default route",
 		family, "route", "delete",
 		"table", tableValue,
-		"unreachable", "default",
+		"default",
+		"dev", handle.config.Name,
+		"src", local.String(),
 	)
 
 	for _, address := range pcscf {

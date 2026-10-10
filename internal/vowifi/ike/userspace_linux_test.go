@@ -152,8 +152,8 @@ func TestLinuxUserspaceInstallerLifecycle(t *testing.T) {
 		"ip", "-4", "route", "show", "table", table,
 	).CombinedOutput(); err != nil ||
 		!strings.Contains(string(output), "10.127.192.82") ||
-		!strings.Contains(string(output), "unreachable default") {
-		t.Fatalf("isolated P-CSCF routes are missing: %v: %s", err, output)
+		!strings.Contains(string(output), "default dev "+config.Name) {
+		t.Fatalf("P-CSCF and tunnel default routes are missing: %v: %s", err, output)
 	}
 	if output, err := exec.Command(
 		"ip", "-4", "route", "get", "10.127.192.82",
@@ -170,9 +170,11 @@ func TestLinuxUserspaceInstallerLifecycle(t *testing.T) {
 	if output, err := exec.Command(
 		"ip", "-4", "route", "get", "198.51.100.1",
 		"from", "10.132.116.34",
-	).CombinedOutput(); err == nil {
+	).CombinedOutput(); err != nil ||
+		!strings.Contains(string(output), "dev "+config.Name) {
 		t.Fatalf(
-			"non-P-CSCF inner traffic escaped the unreachable default: %s",
+			"inner media traffic should be routed through the tunnel: %v: %s",
+			err,
 			output,
 		)
 	}
