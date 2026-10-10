@@ -201,6 +201,7 @@ export function DeviceCallPanel({
         : 0;
       const outcome = call.state === "failed" ? "failed" : entry.answeredAt ? "answered" : "missed";
       onCallRecord({
+        callId: call.id,
         number: call.number,
         direction: call.direction,
         outcome,

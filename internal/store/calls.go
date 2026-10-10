@@ -20,6 +20,7 @@ const (
 // AppendCallHistory persists one finished call and returns the stored row.
 func (s *Store) AppendCallHistory(ctx context.Context, entry CallHistoryEntry) (CallHistoryEntry, error) {
 	entry.DeviceID = strings.TrimSpace(entry.DeviceID)
+	entry.CallID = strings.TrimSpace(entry.CallID)
 	entry.Number = strings.TrimSpace(entry.Number)
 	entry.Direction = strings.TrimSpace(entry.Direction)
 	entry.Outcome = strings.TrimSpace(entry.Outcome)
@@ -42,11 +43,20 @@ func (s *Store) AppendCallHistory(ctx context.Context, entry CallHistoryEntry) (
 	if entry.DurationSeconds < 0 {
 		entry.DurationSeconds = 0
 	}
+	// 同一通 IMS 通话只保留一条：先查已有记录，命中则直接返回。
+	if entry.CallID != "" {
+		if existing, err := s.callHistoryByCallID(ctx, entry.CallID); err == nil {
+			return existing, nil
+		} else if !errors.Is(err, ErrNotFound) {
+			return CallHistoryEntry{}, err
+		}
+	}
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO call_history (
-			device_id, number, direction, outcome, started_at, ended_at, duration_seconds, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			call_id, device_id, number, direction, outcome, started_at, ended_at, duration_seconds, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
+		entry.CallID,
 		entry.DeviceID,
 		entry.Number,
 		entry.Direction,
@@ -57,6 +67,12 @@ func (s *Store) AppendCallHistory(ctx context.Context, entry CallHistoryEntry) (
 		now.Unix(),
 	)
 	if err != nil {
+		// 并发下唯一索引兜底：冲突则回读已有记录。
+		if entry.CallID != "" && strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			if existing, lookupErr := s.callHistoryByCallID(ctx, entry.CallID); lookupErr == nil {
+				return existing, nil
+			}
+		}
 		return CallHistoryEntry{}, fmt.Errorf("append call history for %q: %w", entry.Number, err)
 	}
 	id, err := result.LastInsertId()
@@ -68,6 +84,37 @@ func (s *Store) AppendCallHistory(ctx context.Context, entry CallHistoryEntry) (
 	return entry, nil
 }
 
+func (s *Store) callHistoryByCallID(ctx context.Context, callID string) (CallHistoryEntry, error) {
+	var entry CallHistoryEntry
+	var startedAt, endedAt, createdAt int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, call_id, device_id, number, direction, outcome, started_at, ended_at, duration_seconds, created_at
+		FROM call_history
+		WHERE call_id = ?
+	`, strings.TrimSpace(callID)).Scan(
+		&entry.ID,
+		&entry.CallID,
+		&entry.DeviceID,
+		&entry.Number,
+		&entry.Direction,
+		&entry.Outcome,
+		&startedAt,
+		&endedAt,
+		&entry.DurationSeconds,
+		&createdAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CallHistoryEntry{}, ErrNotFound
+	}
+	if err != nil {
+		return CallHistoryEntry{}, err
+	}
+	entry.StartedAt = time.Unix(startedAt, 0).UTC()
+	entry.EndedAt = time.Unix(endedAt, 0).UTC()
+	entry.CreatedAt = time.Unix(createdAt, 0).UTC()
+	return entry, nil
+}
+
 // ListCallHistory returns the newest entries first. An empty deviceID lists
 // every device; limit is clamped to a sane range.
 func (s *Store) ListCallHistory(ctx context.Context, deviceID string, limit int) ([]CallHistoryEntry, error) {
@@ -75,7 +122,7 @@ func (s *Store) ListCallHistory(ctx context.Context, deviceID string, limit int)
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	query := `SELECT id, device_id, number, direction, outcome, started_at, ended_at, duration_seconds, created_at
+	query := `SELECT id, call_id, device_id, number, direction, outcome, started_at, ended_at, duration_seconds, created_at
 		FROM call_history`
 	args := make([]any, 0, 2)
 	if deviceID != "" {
@@ -97,6 +144,7 @@ func (s *Store) ListCallHistory(ctx context.Context, deviceID string, limit int)
 		var startedAt, endedAt, createdAt int64
 		if err := rows.Scan(
 			&entry.ID,
+			&entry.CallID,
 			&entry.DeviceID,
 			&entry.Number,
 			&entry.Direction,

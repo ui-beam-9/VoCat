@@ -120,6 +120,12 @@ export default function CallsPage() {
     [t],
   );
 
+  const contactNameByNumber = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const contact of savedContacts) map.set(contact.number, contact.name);
+    return map;
+  }, [savedContacts]);
+
   const handleCallRecord = useCallback(
     async (entry: NewCallHistoryEntry) => {
       try {
@@ -261,9 +267,18 @@ export default function CallsPage() {
                           onClick={() => setNumber(entry.number)}
                           className="min-w-0 flex-1 text-left"
                         >
-                          <span className="block truncate text-sm font-medium text-gray-900 dark:text-gray-100">
-                            {entry.number || t("未知号码")}
-                          </span>
+                          {contactNameByNumber.has(entry.number) ? (
+                            <>
+                              <span className="block truncate text-sm font-medium text-gray-900 dark:text-gray-100">
+                                {contactNameByNumber.get(entry.number)}
+                              </span>
+                              <span className="block truncate font-mono text-[10px] text-gray-400">{entry.number}</span>
+                            </>
+                          ) : (
+                            <span className="block truncate text-sm font-medium text-gray-900 dark:text-gray-100">
+                              {entry.number || t("未知号码")}
+                            </span>
+                          )}
                           <span className="block text-xs text-gray-500 dark:text-gray-400">
                             {entry.direction === "incoming" ? t("来电") : t("呼出")} · {outcomeLabel(entry.outcome)} ·{" "}
                             {formatTime(entry.startedAt)}

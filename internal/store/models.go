@@ -232,9 +232,11 @@ type SMSContact struct {
 }
 
 // CallHistoryEntry is one finished VoWiFi call persisted for the history view.
-// Direction is incoming/outgoing; Outcome is answered/missed/failed.
+// Direction is incoming/outgoing; Outcome is answered/missed/failed. CallID is
+// the IMS dialog identifier and deduplicates repeated reports of the same call.
 type CallHistoryEntry struct {
 	ID              int64
+	CallID          string
 	DeviceID        string
 	Number          string
 	Direction       string

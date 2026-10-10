@@ -7,6 +7,7 @@ export type CallOutcome = "answered" | "missed" | "failed";
 
 export interface CallHistoryEntry {
   id: number;
+  callId: string;
   deviceId: string;
   number: string;
   direction: CallDirection;
@@ -32,6 +33,7 @@ export async function createCallHistoryEntry(
   const result = await api<{ entry: CallHistoryEntry }>("/call-history", {
     method: "POST",
     body: {
+      callId: entry.callId,
       deviceId,
       number: entry.number,
       direction: entry.direction,

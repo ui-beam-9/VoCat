@@ -14,7 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 26
+const schemaVersion = 27
 
 var ErrNotFound = errors.New("store: not found")
 
@@ -129,7 +129,8 @@ func migrate(ctx context.Context, db *sql.DB) error {
 					(nextVersion == 16 && strings.Contains(statement, "ADD COLUMN sim_pin")) ||
 					(nextVersion == 19 && strings.Contains(statement, "ADD COLUMN")) ||
 					(nextVersion == 23 && strings.Contains(statement, "ADD COLUMN")) ||
-					(nextVersion == 24 && strings.Contains(statement, "ADD COLUMN mbn_profile"))
+					(nextVersion == 24 && strings.Contains(statement, "ADD COLUMN mbn_profile")) ||
+					(nextVersion == 27 && strings.Contains(statement, "ADD COLUMN call_id"))
 				if duplicateAdditiveColumn && strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 					continue
 				}

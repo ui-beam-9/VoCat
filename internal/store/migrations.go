@@ -514,6 +514,14 @@ func migrationStatements(version int) []string {
 			)`,
 			`CREATE INDEX IF NOT EXISTS contacts_name_idx ON contacts(name)`,
 		}
+	case 27:
+		return []string{
+			// 以 IMS Call-ID 去重：前端刷新/重挂载会重复上报同一通已结束的来电，
+			// 唯一索引保证只保留一条（call_id 为空的历史记录不受约束）。
+			`ALTER TABLE call_history ADD COLUMN call_id TEXT NOT NULL DEFAULT ''`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS call_history_call_id_idx
+				ON call_history(call_id) WHERE call_id <> ''`,
+		}
 	default:
 		return nil
 	}

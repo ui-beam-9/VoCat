@@ -12,6 +12,7 @@ import (
 func callHistoryPayload(entry store.CallHistoryEntry) map[string]any {
 	return map[string]any{
 		"id":               entry.ID,
+		"call_id":          entry.CallID,
 		"device_id":        entry.DeviceID,
 		"number":           entry.Number,
 		"direction":        entry.Direction,
@@ -72,6 +73,7 @@ func (s *Server) handleCallHistory(w http.ResponseWriter, r *http.Request) {
 		})
 	case http.MethodPost:
 		var request struct {
+			CallID          string `json:"call_id"`
 			DeviceID        string `json:"device_id"`
 			Number          string `json:"number"`
 			Direction       string `json:"direction"`
@@ -85,6 +87,7 @@ func (s *Server) handleCallHistory(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		entry := store.CallHistoryEntry{
+			CallID:          request.CallID,
 			DeviceID:        request.DeviceID,
 			Number:          request.Number,
 			Direction:       request.Direction,
