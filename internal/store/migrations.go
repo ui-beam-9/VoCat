@@ -462,7 +462,17 @@ func migrationStatements(version int) []string {
 				updated_at INTEGER NOT NULL,
 				FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
 			)`,
-			`INSERT INTO automatic_tasks SELECT * FROM automatic_tasks_v24`,
+			`INSERT INTO automatic_tasks (
+				id, name, enabled, device_id, profile_iccid, profile_aid, task_type,
+				environment, interval_days, start_date, run_time, timezone, payload_json,
+				retry_count, notify, next_run_at, last_run_at, last_status, last_error,
+				created_at, updated_at
+			) SELECT
+				id, name, enabled, device_id, profile_iccid, profile_aid, task_type,
+				environment, interval_days, start_date, run_time, timezone, payload_json,
+				retry_count, notify, next_run_at, last_run_at, last_status, last_error,
+				created_at, updated_at
+			FROM automatic_tasks_v24`,
 			`CREATE TABLE automatic_task_runs (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				task_id INTEGER NOT NULL,
@@ -490,6 +500,12 @@ func migrationStatements(version int) []string {
 		}
 	case 26:
 		return []string{
+			`ALTER TABLE automatic_tasks
+				ADD COLUMN revert_profile INTEGER NOT NULL DEFAULT 1
+				CHECK (revert_profile IN (0, 1))`,
+		}
+	case 27:
+		return []string{
 			// VoWiFi 通话记录由服务端持久化，供任意浏览器/设备查看与清空。
 			`CREATE TABLE IF NOT EXISTS call_history (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -514,7 +530,7 @@ func migrationStatements(version int) []string {
 			)`,
 			`CREATE INDEX IF NOT EXISTS contacts_name_idx ON contacts(name)`,
 		}
-	case 27:
+	case 28:
 		return []string{
 			// 以 IMS Call-ID 去重：前端刷新/重挂载会重复上报同一通已结束的来电，
 			// 唯一索引保证只保留一条（call_id 为空的历史记录不受约束）。
