@@ -106,6 +106,39 @@ class PlaybackProcessor extends AudioWorkletProcessor {
 registerProcessor('vocat-playback', PlaybackProcessor);
 `;
 
+// getUserMedia 只在安全上下文（HTTPS / localhost）暴露；HTTP 内网访问时
+// navigator.mediaDevices 为 undefined，直接调用会抛出 "Cannot read properties of undefined"。
+export function callAudioSupported(): boolean {
+  return typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
+}
+
+export function callAudioUnsupportedReason(): string {
+  if (typeof window !== "undefined" && !window.isSecureContext) {
+    return "当前页面不是安全上下文（需 HTTPS 或 localhost），浏览器不会提供麦克风/扬声器";
+  }
+  return "当前浏览器不支持网页音频（getUserMedia 不可用）";
+}
+
+// 把浏览器的媒体错误翻译为可读提示。
+function mediaErrorMessage(error: unknown): string {
+  if (typeof DOMException !== "undefined" && error instanceof DOMException) {
+    switch (error.name) {
+      case "NotAllowedError":
+      case "SecurityError":
+        return "麦克风权限被拒绝或被浏览器策略阻止，请允许麦克风后重试";
+      case "NotFoundError":
+        return "未找到可用的麦克风设备";
+      case "NotReadableError":
+        return "麦克风被其他程序占用，无法读取";
+      case "OverconstrainedError":
+        return "麦克风不支持所需的音频参数";
+      default:
+        return error.message || error.name;
+    }
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function callMediaURL(deviceId: string, callId: string): string {
   const scheme = window.location.protocol === "https:" ? "wss" : "ws";
   const params = new URLSearchParams({ call_id: callId });
@@ -140,6 +173,11 @@ export class CallAudioSession {
 
   async start(): Promise<void> {
     this.events.onState?.("connecting");
+    if (!callAudioSupported()) {
+      const reason = callAudioUnsupportedReason();
+      this.events.onState?.("error", reason);
+      throw new Error(reason);
+    }
     try {
       // 先申请麦克风权限，便于尽早抛出明确的授权错误。
       this.stream = await navigator.mediaDevices.getUserMedia({
@@ -194,8 +232,10 @@ export class CallAudioSession {
       ws.onerror = () => this.events.onState?.("error", "WebSocket error");
       ws.onclose = () => this.stop();
     } catch (error) {
+      const message = mediaErrorMessage(error);
       this.stop();
-      throw error instanceof Error ? error : new Error(String(error));
+      this.events.onState?.("error", message);
+      throw new Error(message);
     }
   }
 

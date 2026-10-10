@@ -7,6 +7,14 @@
 export const EN_DICT: Record<string, string> = {
   // 语音通话（VoWiFi 网页拨号）
   "语音通话": "Voice call",
+  "通过 VoWiFi（WiFi Calling）在浏览器内拨号、接听与通话": "Dial, answer and talk in the browser over VoWiFi (WiFi Calling)",
+  "网页音频不可用：{reason}。拨号信令仍可用，但无法进行语音通话，请改用 HTTPS 或 localhost 访问。": "Browser audio is unavailable: {reason}. Dialing still works, but voice calls will not; access the panel over HTTPS or localhost.",
+  "当前页面不是安全上下文（需 HTTPS 或 localhost），浏览器不会提供麦克风/扬声器": "This page is not a secure context (HTTPS or localhost required), so the browser does not expose microphone/speaker access",
+  "当前浏览器不支持网页音频（getUserMedia 不可用）": "This browser does not support browser audio (getUserMedia unavailable)",
+  "麦克风权限被拒绝或被浏览器策略阻止，请允许麦克风后重试": "Microphone permission was denied or blocked by browser policy. Allow the microphone and retry.",
+  "未找到可用的麦克风设备": "No microphone device was found",
+  "麦克风被其他程序占用，无法读取": "The microphone is in use by another program and cannot be read",
+  "麦克风不支持所需的音频参数": "The microphone does not support the required audio parameters",
   "拨号": "Dial",
   "接听": "Answer",
   "挂断": "Hang up",

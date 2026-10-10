@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Input, StatusDot } from "../ui";
 import { cx } from "../../lib/utils";
-import { useI18n } from "../../lib/i18n";
+import { tf, useI18n } from "../../lib/i18n";
 import { apiMessage } from "../../api";
 import {
   answerCall,
@@ -12,8 +12,7 @@ import {
   type CallState,
   type VoWiFiCall,
 } from "./callApi";
-import { CallAudioSession, type CallAudioState } from "../../lib/callAudio";
-import type { DeviceDetail } from "./types";
+import { callAudioSupported, callAudioUnsupportedReason, CallAudioSession, type CallAudioState } from "../../lib/callAudio";
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -40,7 +39,7 @@ function isLiveCall(state: CallState): boolean {
   return state !== "ended" && state !== "failed";
 }
 
-export function DeviceCallPanel({ device }: { device: DeviceDetail }) {
+export function DeviceCallPanel({ device }: { device: { id: string } }) {
   const { t } = useI18n();
   const [calls, setCalls] = useState<VoWiFiCall[]>([]);
   const [transport, setTransport] = useState<string>("");
@@ -56,6 +55,7 @@ export function DeviceCallPanel({ device }: { device: DeviceDetail }) {
 
   const deviceId = device.id;
   const voWiFiReady = transport === "vowifi";
+  const audioSupported = callAudioSupported();
 
   const refresh = useCallback(async () => {
     if (!deviceId) return;
@@ -225,6 +225,12 @@ export function DeviceCallPanel({ device }: { device: DeviceDetail }) {
           {audioLabel}
         </div>
       </div>
+
+      {!audioSupported ? (
+        <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-200">
+          {tf("网页音频不可用：{reason}。拨号信令仍可用，但无法进行语音通话，请改用 HTTPS 或 localhost 访问。", { reason: callAudioUnsupportedReason() })}
+        </div>
+      ) : null}
 
       {!voWiFiReady ? (
         <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-200">
