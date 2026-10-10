@@ -5,7 +5,6 @@
  * 富文本片段（嵌套链接/代码块的说明框）不走字典，在组件里按语言分支渲染。
  */
 export const EN_DICT: Record<string, string> = {
-  "蜂窝射频已关闭，已阻止整机重启。关闭 VoWiFi 和飞行模式后才能重启，这会开启蜂窝射频。": "Cellular RF is disabled, so the modem restart was blocked. Disable VoWiFi and airplane mode before restarting; this will enable cellular RF.",
   "清空配置": "Clear configuration",
   "清空后将移除该渠道的账号、地址和凭据，其他选项恢复默认值。启用状态保持不变，点击“保存通知配置”后生效。": "This removes accounts, addresses and credentials and restores other options to defaults. The enabled state stays unchanged. Click Save notification settings to apply.",
   "启用 MeoW 推送": "Enable MeoW notifications",
@@ -205,6 +204,10 @@ export const EN_DICT: Record<string, string> = {
   上次结果: "Last Result",
   完成后推送通知: "Notify on Completion",
   不推送通知: "No Notifications",
+  完成后切回原卡: "Revert to previous SIM/Profile",
+  保持当前卡: "Keep active SIM/Profile",
+  任务完成后切回原卡: "Revert to previous SIM/Profile after completion",
+  "若执行前活跃卡与任务卡不同，任务完成后自动切回执行前的 SIM / Profile 并恢复其网络策略": "If the active card before execution differs from the task card, automatically switch back to the previous SIM or profile and restore its network policy after completion.",
   "失败重试 {count} 次": "Retry {count} times on failure",
   拨打电话并自动挂断: "Call and Auto Hang Up",
   获取漫游公网IP: "Get Roaming Public IP",
@@ -527,6 +530,11 @@ export const EN_DICT: Record<string, string> = {
   用户操作: "User Operations",
   系统错误: "System",
   "最多 10000 条": "Up to 10,000",
+  类型保留: "Retention Level",
+  "DEBUG 及以上": "DEBUG and above",
+  "INFO 及以上": "INFO and above",
+  "WARN 及以上": "WARN and above",
+  "ERROR (仅严重报错)": "ERROR only",
   达到上限后自动删除最旧日志: "The oldest logs are automatically removed at the limit",
   "此操作会永久删除服务端保存的全部日志，无法恢复。": "This permanently deletes all logs stored on the server and cannot be undone.",
   "确认清空日志？": "Clear all logs?",
