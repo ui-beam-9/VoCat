@@ -153,23 +153,30 @@ jobs:
           password: ${{ secrets.HUAWEI_SWR_DOCKER_PASSWORD }}
 
       - name: Build and push multi-arch image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          # 关闭 provenance/SBOM 证明清单：buildx 默认会额外推送 attestation
-          # 清单，形成带 unknown/unknown 平台的 OCI index，华为云 SWR 无法解析
-          # （报 fail to parse 'manifest.json'）。
-          provenance: false
-          sbom: false
-          build-args: |
-            VERSION=${{ steps.version.outputs.version }}
-            BUILD_TIME=${{ steps.version.outputs.build_time }}
-          tags: ${{ steps.tags.outputs.tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_TIME: ${{ steps.version.outputs.build_time }}
+        run: |
+          set -euo pipefail
+          tag_args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && tag_args+=( --tag "$tag" )
+          done < /tmp/tags.txt
+          # 华为云 SWR 基础版不支持 OCI 规范（v1.0/v1.1）镜像：
+          # 必须 --provenance=false 关闭 attestation，并显式用 Docker 媒体类型
+          # （type=registry 的 oci-mediatypes=false），否则报
+          # "Invalid image, fail to parse 'manifest.json'"。GHCR 两者皆可。
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --provenance=false \
+            --sbom=false \
+            --output type=registry,oci-mediatypes=false \
+            "${tag_args[@]}" \
+            --build-arg "VERSION=${VERSION}" \
+            --build-arg "BUILD_TIME=${BUILD_TIME}" \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            .
 
       - name: Set up Python for SWR API
         if: steps.tags.outputs.swr_enabled == 'true' && env.SWR_AK != ''
