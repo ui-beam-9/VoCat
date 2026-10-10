@@ -174,6 +174,29 @@ function mediaErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+// 语音通道 WebSocket 升级失败时，用普通 HTTP GET 回查服务端返回的 JSON 错误，
+// 以便把真实原因（如 call_media_unavailable / 通话状态不满足）展示给用户。
+async function probeMediaError(deviceId: string, callId: string): Promise<string> {
+  try {
+    const httpURL = callMediaURL(deviceId, callId).replace(/^ws/, "http");
+    const response = await fetch(httpURL, {
+      credentials: "include",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    const text = await response.text();
+    if (!text) return "";
+    try {
+      const payload = JSON.parse(text) as { error?: { message?: string }; message?: string };
+      return payload.error?.message || payload.message || "";
+    } catch {
+      return text.slice(0, 200);
+    }
+  } catch {
+    return "";
+  }
+}
+
 export function callMediaURL(deviceId: string, callId: string): string {
   const scheme = window.location.protocol === "https:" ? "wss" : "ws";
   const params = new URLSearchParams({ call_id: callId });
@@ -199,6 +222,7 @@ export class CallAudioSession {
   private captureNode?: AudioWorkletNode;
   private playbackNode?: AudioWorkletNode;
   private closed = false;
+  private wsFailed = false;
 
   constructor(
     private readonly deviceId: string,
@@ -264,8 +288,20 @@ export class CallAudioSession {
           this.playbackNode?.port.postMessage(event.data);
         }
       };
-      ws.onerror = () => this.events.onState?.("error", "WebSocket error");
-      ws.onclose = () => this.stop();
+      ws.onerror = () => {
+        this.wsFailed = true;
+      };
+      ws.onclose = (event: CloseEvent) => {
+        const closedByUs = this.closed;
+        this.stop();
+        if (closedByUs || !this.wsFailed) return;
+        void probeMediaError(this.deviceId, this.callId).then((detail) => {
+          this.events.onState?.(
+            "error",
+            detail || `语音通道连接失败（WebSocket ${event.code || 1006}）`,
+          );
+        });
+      };
     } catch (error) {
       const message = mediaErrorMessage(error);
       this.stop();
