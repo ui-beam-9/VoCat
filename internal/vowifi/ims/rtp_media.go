@@ -71,13 +71,11 @@ func (media *rtpMedia) ready() bool {
 }
 
 func (media *rtpMedia) offerSDP(local net.IP) []byte {
-	return media.buildSDP(local, "8 0 104 102 100", []string{
+	// 只报价 G.711（PCMA/PCMU）与电话事件：RTP 层仅实现了 G.711 编解码，
+	// 若报价 AMR-WB/AMR 会被运营商选中，导致把 AMR 负载当 G.711 处理而无声音。
+	return media.buildSDP(local, "8 0 100", []string{
 		"a=rtpmap:8 PCMA/8000",
 		"a=rtpmap:0 PCMU/8000",
-		"a=rtpmap:104 AMR-WB/16000",
-		"a=fmtp:104 mode-change-capability=2;max-red=220",
-		"a=rtpmap:102 AMR/8000",
-		"a=fmtp:102 mode-change-capability=2;max-red=220",
 		"a=rtpmap:100 telephone-event/8000",
 		"a=fmtp:100 0-15",
 	})
@@ -90,12 +88,9 @@ func (media *rtpMedia) answerSDP(local net.IP) []byte {
 	if codec == "" {
 		return media.offerSDP(local)
 	}
-	rate := 8000
-	if codec == "AMR-WB" {
-		rate = 16000
-	}
+	// 仅支持 G.711，采样率固定 8kHz。
 	return media.buildSDP(local, strconv.Itoa(int(payload)), []string{
-		fmt.Sprintf("a=rtpmap:%d %s/%d", payload, codec, rate),
+		fmt.Sprintf("a=rtpmap:%d %s/8000", payload, codec),
 	})
 }
 
@@ -126,10 +121,6 @@ func (media *rtpMedia) buildSDP(local net.IP, formats string, attributes []strin
 		lines = append(lines,
 			"a=rtpmap:8 PCMA/8000",
 			"a=rtpmap:0 PCMU/8000",
-			"a=rtpmap:104 AMR-WB/16000",
-			"a=fmtp:104 mode-change-capability=2;max-red=220",
-			"a=rtpmap:102 AMR/8000",
-			"a=fmtp:102 mode-change-capability=2;max-red=220",
 			"a=rtpmap:100 telephone-event/8000",
 			"a=fmtp:100 0-15",
 		)
@@ -159,21 +150,16 @@ func (media *rtpMedia) configureRemote(body []byte) error {
 				name = "PCMU"
 			case 8:
 				name = "PCMA"
-			case 100:
-				continue
 			default:
-				name = fmt.Sprintf("PAYLOAD-%d", parsed)
+				continue
 			}
 		}
-		if name != "TELEPHONE-EVENT" {
-			codec, payload = name, byte(parsed)
-			break
+		// 仅接受 G.711（PCMA/PCMU），跳过电话事件与 AMR-WB/AMR 等未实现的编码。
+		if name != "PCMA" && name != "PCMU" {
+			continue
 		}
-	}
-	if codec == "" && len(formats) > 0 {
-		if parsed, parseErr := strconv.Atoi(formats[0]); parseErr == nil && parsed >= 0 && parsed <= 127 {
-			codec, payload = fmt.Sprintf("PAYLOAD-%d", parsed), byte(parsed)
-		}
+		codec, payload = name, byte(parsed)
+		break
 	}
 	if codec == "" {
 		return errors.New("ims: remote SDP has no usable audio format")

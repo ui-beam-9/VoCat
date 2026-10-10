@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -51,5 +52,41 @@ func TestRTPMediaCarriesPCMOverPCMA(t *testing.T) {
 func TestParseAudioSDPRejectsMissingEndpoint(t *testing.T) {
 	if _, _, _, _, err := parseAudioSDP([]byte("v=0\r\nm=audio 0 RTP/AVP 8\r\n")); err == nil {
 		t.Fatal("expected unusable SDP error")
+	}
+}
+
+func TestOfferSDPOnlyAdvertisesG711(t *testing.T) {
+	media, err := newRTPMedia(net.IPv4(127, 0, 0, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer media.Close()
+	offer := string(media.offerSDP(net.IPv4(127, 0, 0, 1)))
+	if strings.Contains(offer, "AMR") {
+		t.Fatalf("offer unexpectedly advertises AMR:\n%s", offer)
+	}
+}
+
+func TestConfigureRemoteIgnoresUnsupportedCodecs(t *testing.T) {
+	media, err := newRTPMedia(net.IPv4(127, 0, 0, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer media.Close()
+	// 运营商把 AMR-WB(104) 排在前面，但本实现只支持 G.711，应选择后面的 PCMA(8)。
+	body := []byte("v=0\r\n" +
+		"o=- 1 1 IN IP4 127.0.0.1\r\n" +
+		"s=-\r\n" +
+		"c=IN IP4 127.0.0.1\r\n" +
+		"t=0 0\r\n" +
+		"m=audio 4000 RTP/AVP 104 8 100\r\n" +
+		"a=rtpmap:104 AMR-WB/16000\r\n" +
+		"a=rtpmap:8 PCMA/8000\r\n" +
+		"a=rtpmap:100 telephone-event/8000\r\n")
+	if err := media.configureRemote(body); err != nil {
+		t.Fatal(err)
+	}
+	if media.Codec() != "PCMA" {
+		t.Fatalf("negotiated codec = %q, want PCMA", media.Codec())
 	}
 }
