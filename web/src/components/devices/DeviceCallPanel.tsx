@@ -13,6 +13,8 @@ import {
   type VoWiFiCall,
 } from "./callApi";
 import { callAudioDiagnostics, CallAudioSession, type CallAudioState } from "../../lib/callAudio";
+import { DialPad } from "./DialPad";
+import type { NewCallHistoryEntry } from "../../lib/callHistory";
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -39,7 +41,21 @@ function isLiveCall(state: CallState): boolean {
   return state !== "ended" && state !== "failed";
 }
 
-export function DeviceCallPanel({ device }: { device: { id: string } }) {
+export interface DeviceCallPanelProps {
+  device: { id: string };
+  // 可选受控号码：供通讯录/通话记录回填。未提供时组件内部自管。
+  number?: string;
+  onNumberChange?: (value: string) => void;
+  // 通话结束时回调，用于写入本地通话记录。
+  onCallRecord?: (entry: NewCallHistoryEntry) => void;
+}
+
+export function DeviceCallPanel({
+  device,
+  number: numberProp,
+  onNumberChange,
+  onCallRecord,
+}: DeviceCallPanelProps) {
   const { t } = useI18n();
   const [calls, setCalls] = useState<VoWiFiCall[]>([]);
   const [transport, setTransport] = useState<string>("");
@@ -47,13 +63,22 @@ export function DeviceCallPanel({ device }: { device: { id: string } }) {
   const [error, setError] = useState("");
   const [mediaError, setMediaError] = useState("");
   const [audioState, setAudioState] = useState<CallAudioState | "idle">("idle");
-  const [dialNumber, setDialNumber] = useState("");
+  const [internalNumber, setInternalNumber] = useState("");
   const [busy, setBusy] = useState(false);
 
   const sessionRef = useRef<CallAudioSession | null>(null);
   const sessionCallIdRef = useRef<string>("");
+  const trackedCallsRef = useRef<Map<string, { startedAt: string; answeredAt?: string; ended: boolean }>>(new Map());
 
   const deviceId = device.id;
+  const number = numberProp ?? internalNumber;
+  const setNumber = useCallback(
+    (value: string) => {
+      if (numberProp === undefined) setInternalNumber(value);
+      onNumberChange?.(value);
+    },
+    [numberProp, onNumberChange],
+  );
   const voWiFiReady = transport === "vowifi";
   const audioDiag = useMemo(() => callAudioDiagnostics(), []);
   const [diagOpen, setDiagOpen] = useState(false);
@@ -154,23 +179,55 @@ export function DeviceCallPanel({ device }: { device: { id: string } }) {
     setAudioState("idle");
   }, []);
 
+  // 通话进入终态时写入本地通话记录；同一通话只记录一次。
+  useEffect(() => {
+    if (!onCallRecord) return;
+    const tracked = trackedCallsRef.current;
+    for (const call of calls) {
+      let entry = tracked.get(call.id);
+      if (!entry) {
+        entry = { startedAt: call.startedAt || new Date().toISOString(), ended: false };
+        tracked.set(call.id, entry);
+      }
+      if (call.state === "active" && !entry.answeredAt) {
+        entry.answeredAt = new Date().toISOString();
+      }
+      const terminal = call.state === "ended" || call.state === "failed";
+      if (!terminal || entry.ended) continue;
+      entry.ended = true;
+      const endedAt = call.endedAt || new Date().toISOString();
+      const durationSeconds = entry.answeredAt
+        ? Math.max(0, Math.round((new Date(endedAt).getTime() - new Date(entry.answeredAt).getTime()) / 1000))
+        : 0;
+      const outcome = call.state === "failed" ? "failed" : entry.answeredAt ? "answered" : "missed";
+      onCallRecord({
+        number: call.number,
+        direction: call.direction,
+        outcome,
+        startedAt: entry.startedAt,
+        endedAt,
+        durationSeconds,
+      });
+    }
+  }, [calls, onCallRecord]);
+
   const handleDial = useCallback(async () => {
-    const number = dialNumber.trim();
-    if (!validateCallNumber(number).valid) {
+    const target = number.trim();
+    if (!validateCallNumber(target).valid) {
       setError(t("号码格式不正确：请输入 2-32 位数字，可含首位 +、*、#"));
       return;
     }
     setBusy(true);
     setError("");
     try {
-      await dialCall(deviceId, number);
+      await dialCall(deviceId, target);
       await refresh();
     } catch (err) {
       setError(apiMessage(err));
     } finally {
       setBusy(false);
     }
-  }, [deviceId, dialNumber, refresh, t]);
+  }, [deviceId, number, refresh, t]);
 
   const handleAnswer = useCallback(
     async (call: VoWiFiCall) => {
@@ -286,20 +343,25 @@ export function DeviceCallPanel({ device }: { device: { id: string } }) {
         </div>
       ) : null}
 
-      <div className="flex items-stretch gap-2">
-        <Input
-          value={dialNumber}
-          onChange={(event) => setDialNumber(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !busy && voWiFiReady) void handleDial();
-          }}
-          placeholder={t("输入号码，如 10086 或 +8613800000000")}
-          disabled={!voWiFiReady || busy}
-        />
-        <Button variant="primary" onClick={() => void handleDial()} loading={busy} disabled={!voWiFiReady || !loaded}>
-          {t("拨号")}
-        </Button>
-      </div>
+      <Input
+        value={number}
+        onChange={(event) => setNumber(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !busy && voWiFiReady) void handleDial();
+        }}
+        placeholder={t("输入号码，如 10086 或 +8613800000000")}
+        disabled={!voWiFiReady || busy}
+      />
+      <DialPad
+        className="mt-3"
+        disabled={!voWiFiReady || busy}
+        callDisabled={!voWiFiReady || busy || !loaded}
+        callLabel={t("拨号")}
+        onDigit={(digit) => setNumber(number + digit)}
+        onPlus={() => setNumber(number + "+")}
+        onBackspace={() => setNumber(number.slice(0, -1))}
+        onCall={() => void handleDial()}
+      />
 
       {liveCalls.length > 0 ? (
         <div className="mt-3 space-y-2">

@@ -12,7 +12,6 @@ import { DeviceOverviewTab } from "../components/devices/DeviceOverviewTab";
 import { DeviceEsimTab } from "../components/devices/DeviceEsimTab";
 import { DeviceAtTab } from "../components/devices/DeviceAtTab";
 import { DeviceUssdTab } from "../components/devices/DeviceUssdTab";
-import { DeviceCallPanel } from "../components/devices/DeviceCallPanel";
 import { DeviceConfigTab } from "../components/devices/DeviceConfigTab";
 import { CardPolicyPanel } from "../components/devices/CardPolicyPanel";
 import { DeviceAddDialog } from "../components/devices/DeviceAddDialog";
@@ -21,7 +20,7 @@ import { copyText, isDeviceOnline, isQmiControl, isRecoveringPhase, readEventStr
 import type { AddDeviceForm, DeviceDetail, LoadError } from "../components/devices/types";
 import { tf, useI18n } from "../lib/i18n";
 
-const VALID_TABS = new Set(["overview", "call", "esim", "at", "ussd", "config", "card"]);
+const VALID_TABS = new Set(["overview", "esim", "at", "ussd", "config", "card"]);
 const CELLULAR_DATA_POLL_MS = 1000;
 const CELLULAR_DATA_DISABLE_UI_TIMEOUT_MS = 35000;
 const CELLULAR_DATA_ENABLE_UI_TIMEOUT_MS = 80000;
@@ -661,14 +660,12 @@ export default function DevicesPage() {
   const addAtLimit = deviceLimit > 0 && list.length >= deviceLimit;
   const tabItems = [
     { key: "overview", label: t("概览") },
-    { key: "call", label: t("通话") },
     { key: "esim", label: t("eSIM") },
     { key: "at", label: t("AT 终端") },
     { key: "ussd", label: t("USSD") },
     { key: "config", label: t("配置") },
     { key: "card", label: t("卡策略") },
-  ].filter((tab) => !isReader || !["at", "ussd"].includes(tab.key))
-    .filter((tab) => !isNative410 || tab.key !== "call");
+  ].filter((tab) => !isReader || !["at", "ussd"].includes(tab.key));
 
   const overviewNode = detail?.id === selectedId ? (
     <div className="space-y-4">
@@ -769,7 +766,6 @@ export default function DevicesPage() {
                 <Tabs tabs={tabItems} value={activeTab} onChange={handleTabChange} />
                 <div className="mt-5">
                   {activeTab === "overview" ? overviewNode : null}
-                  {activeTab === "call" ? <DeviceCallPanel device={detail} /> : null}
                   {activeTab === "esim" ? (
                     <DeviceEsimTab
                       deviceId={detail.id}
