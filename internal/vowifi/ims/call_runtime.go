@@ -215,17 +215,21 @@ func (session *Session) watchOutgoingCall(call *imsCall, key sipTransactionKey) 
 			}
 			if response.StatusCode >= 200 && response.StatusCode < 300 {
 				session.updateCallDialogFromResponse(call, response)
-				mediaErr := call.media.configureRemote(response.Body)
-				_ = session.sendACK(call)
-				if mediaErr != nil {
-					session.finishCall(call.callID, "failed", response.StatusCode, mediaErr.Error())
-					go func() {
-						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-						defer cancel()
-						_ = session.sendDialogRequest(ctx, call, "BYE")
-					}()
-					return
+				// 2xx 响应可能不携带 SDP：媒体往往已在 183 Session Progress 中协商。
+				// 仅在响应确实带有 SDP 时才重新协商，否则空 SDP 会被误判为失败并立即挂断。
+				if len(response.Body) > 0 {
+					if mediaErr := call.media.configureRemote(response.Body); mediaErr != nil {
+						_ = session.sendACK(call)
+						session.finishCall(call.callID, "failed", response.StatusCode, mediaErr.Error())
+						go func() {
+							ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+							defer cancel()
+							_ = session.sendDialogRequest(ctx, call, "BYE")
+						}()
+						return
+					}
 				}
+				_ = session.sendACK(call)
 				session.setCallMediaReady(call.callID)
 				session.setCallState(call.callID, "active")
 				session.startSessionTimer(call, response.value("Session-Expires"))

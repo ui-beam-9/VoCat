@@ -203,14 +203,19 @@ export function callMediaURL(deviceId: string, callId: string): string {
   return `${scheme}://${window.location.host}/api/devices/${encodeURIComponent(deviceId)}/calls/media?${params.toString()}`;
 }
 
-async function loadWorkletModule(ctx: AudioContext): Promise<void> {
+// 返回 worklet 模块的 blob URL，由调用方在会话结束（AudioContext 关闭）后撤销。
+// AudioWorklet 在音频线程异步拉取脚本，addModule 的 Promise 返回与脚本真正加载完成
+// 存在竞态；若在此处立即撤销 URL，会导致 "Failed to load worklet module script"。
+async function loadWorkletModule(ctx: AudioContext): Promise<string> {
   const blob = new Blob([WORKLET_SOURCE], { type: "application/javascript" });
   const url = URL.createObjectURL(blob);
   try {
     await ctx.audioWorklet.addModule(url);
-  } finally {
+  } catch (error) {
     URL.revokeObjectURL(url);
+    throw error;
   }
+  return url;
 }
 
 // 一次通话对应的音频会话：麦克风采集 + 扬声器播放 + WebSocket 传输。
@@ -223,6 +228,7 @@ export class CallAudioSession {
   private playbackNode?: AudioWorkletNode;
   private closed = false;
   private wsFailed = false;
+  private workletURL?: string;
 
   constructor(
     private readonly deviceId: string,
@@ -253,7 +259,7 @@ export class CallAudioSession {
         ctx = new Ctor();
       }
       this.ctx = ctx;
-      await loadWorkletModule(ctx);
+      this.workletURL = await loadWorkletModule(ctx);
 
       const capture = new AudioWorkletNode(ctx, "vocat-capture");
       const playback = new AudioWorkletNode(ctx, "vocat-playback", {
@@ -331,6 +337,10 @@ export class CallAudioSession {
       /* ignore */
     }
     this.stream?.getTracks().forEach((track) => track.stop());
+    if (this.workletURL) {
+      URL.revokeObjectURL(this.workletURL);
+      this.workletURL = undefined;
+    }
     if (this.ctx && this.ctx.state !== "closed") void this.ctx.close();
     this.events.onState?.("closed");
   }
