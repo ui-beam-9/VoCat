@@ -619,6 +619,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	handler.StartTelegramBot(pollContext)
 	handler.StartSMSNotificationDispatchers(pollContext)
 	go handler.StartCellularCallMonitor(pollContext)
+	go handler.StartVoWiFiCallRecorder(pollContext)
 	handler.StartAutomaticTasks(pollContext)
 
 	serverConfig := func(handler http.Handler) *http.Server {

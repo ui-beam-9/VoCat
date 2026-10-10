@@ -29,6 +29,8 @@ export const EN_DICT: Record<string, string> = {
   "暂无联系人": "No contacts",
   "已接通": "Answered",
   "未接": "Missed",
+  "未接来电": "Missed call",
+  "未接通": "Not answered",
   "拨打": "Call",
   "保存为联系人": "Save as contact",
   "姓名": "Name",

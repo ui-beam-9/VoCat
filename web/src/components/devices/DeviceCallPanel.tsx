@@ -14,7 +14,6 @@ import {
 } from "./callApi";
 import { callAudioDiagnostics, CallAudioSession, type CallAudioState } from "../../lib/callAudio";
 import { DialPad } from "./DialPad";
-import type { NewCallHistoryEntry } from "../../lib/callHistory";
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -46,15 +45,12 @@ export interface DeviceCallPanelProps {
   // 可选受控号码：供通讯录/通话记录回填。未提供时组件内部自管。
   number?: string;
   onNumberChange?: (value: string) => void;
-  // 通话结束时回调，用于写入本地通话记录。
-  onCallRecord?: (entry: NewCallHistoryEntry) => void;
 }
 
 export function DeviceCallPanel({
   device,
   number: numberProp,
   onNumberChange,
-  onCallRecord,
 }: DeviceCallPanelProps) {
   const { t } = useI18n();
   const [calls, setCalls] = useState<VoWiFiCall[]>([]);
@@ -68,7 +64,6 @@ export function DeviceCallPanel({
 
   const sessionRef = useRef<CallAudioSession | null>(null);
   const sessionCallIdRef = useRef<string>("");
-  const trackedCallsRef = useRef<Map<string, { startedAt: string; answeredAt?: string; ended: boolean }>>(new Map());
 
   const deviceId = device.id;
   const number = numberProp ?? internalNumber;
@@ -178,39 +173,6 @@ export function DeviceCallPanel({
     sessionCallIdRef.current = "";
     setAudioState("idle");
   }, []);
-
-  // 通话进入终态时写入本地通话记录；同一通话只记录一次。
-  useEffect(() => {
-    if (!onCallRecord) return;
-    const tracked = trackedCallsRef.current;
-    for (const call of calls) {
-      let entry = tracked.get(call.id);
-      if (!entry) {
-        entry = { startedAt: call.startedAt || new Date().toISOString(), ended: false };
-        tracked.set(call.id, entry);
-      }
-      if (call.state === "active" && !entry.answeredAt) {
-        entry.answeredAt = new Date().toISOString();
-      }
-      const terminal = call.state === "ended" || call.state === "failed";
-      if (!terminal || entry.ended) continue;
-      entry.ended = true;
-      const endedAt = call.endedAt || new Date().toISOString();
-      const durationSeconds = entry.answeredAt
-        ? Math.max(0, Math.round((new Date(endedAt).getTime() - new Date(entry.answeredAt).getTime()) / 1000))
-        : 0;
-      const outcome = call.state === "failed" ? "failed" : entry.answeredAt ? "answered" : "missed";
-      onCallRecord({
-        callId: call.id,
-        number: call.number,
-        direction: call.direction,
-        outcome,
-        startedAt: entry.startedAt,
-        endedAt,
-        durationSeconds,
-      });
-    }
-  }, [calls, onCallRecord]);
 
   const handleDial = useCallback(async () => {
     const target = number.trim();

@@ -1,6 +1,6 @@
 import { api } from "../api";
 
-// 通话记录（服务端数据库存储）。列表/新增/清空均走 /api/call-history。
+// 通话记录（服务端数据库存储）。通话记录由服务端实时写入，前端只读/清空。
 
 export type CallDirection = "incoming" | "outgoing";
 export type CallOutcome = "answered" | "missed" | "failed";
@@ -17,33 +17,11 @@ export interface CallHistoryEntry {
   durationSeconds: number;
 }
 
-export type NewCallHistoryEntry = Omit<CallHistoryEntry, "id" | "deviceId">;
-
 export async function fetchCallHistory(deviceId?: string): Promise<CallHistoryEntry[]> {
   const params = new URLSearchParams({ limit: "200" });
   if (deviceId) params.set("device_id", deviceId);
   const result = await api<{ entries?: CallHistoryEntry[] }>(`/call-history?${params.toString()}`);
   return result.entries ?? [];
-}
-
-export async function createCallHistoryEntry(
-  deviceId: string,
-  entry: NewCallHistoryEntry,
-): Promise<CallHistoryEntry> {
-  const result = await api<{ entry: CallHistoryEntry }>("/call-history", {
-    method: "POST",
-    body: {
-      callId: entry.callId,
-      deviceId,
-      number: entry.number,
-      direction: entry.direction,
-      outcome: entry.outcome,
-      startedAt: entry.startedAt,
-      endedAt: entry.endedAt,
-      durationSeconds: entry.durationSeconds,
-    },
-  });
-  return result.entry;
 }
 
 export async function clearCallHistory(deviceId?: string): Promise<void> {

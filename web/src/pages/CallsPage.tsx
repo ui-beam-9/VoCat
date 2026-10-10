@@ -9,11 +9,10 @@ import { cx } from "../lib/utils";
 import { fetchContacts, saveContact, type Contact } from "../lib/contacts";
 import {
   clearCallHistory,
-  createCallHistoryEntry,
   fetchCallHistory,
+  type CallDirection,
   type CallHistoryEntry,
   type CallOutcome,
-  type NewCallHistoryEntry,
 } from "../lib/callHistory";
 import type { DeviceListItem, DevicesResponse, SMSContact } from "../types";
 
@@ -115,8 +114,11 @@ export default function CallsPage() {
   }, [tab, loadContacts]);
 
   const outcomeLabel = useCallback(
-    (outcome: CallOutcome) =>
-      outcome === "answered" ? t("已接通") : outcome === "missed" ? t("未接") : t("呼叫失败"),
+    (outcome: CallOutcome, direction: CallDirection) => {
+      if (outcome === "answered") return t("已接通");
+      if (outcome === "failed") return t("呼叫失败");
+      return direction === "incoming" ? t("未接来电") : t("未接通");
+    },
     [t],
   );
 
@@ -126,17 +128,13 @@ export default function CallsPage() {
     return map;
   }, [savedContacts]);
 
-  const handleCallRecord = useCallback(
-    async (entry: NewCallHistoryEntry) => {
-      try {
-        await createCallHistoryEntry(selectedId, entry);
-        await refreshHistory();
-      } catch {
-        /* 记录失败不影响通话流程 */
-      }
-    },
-    [selectedId, refreshHistory],
-  );
+  // 通话记录由服务端实时写入，这里定期刷新以便近实时显示。
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void refreshHistory();
+    }, POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [refreshHistory]);
 
   const handleClearHistory = useCallback(async () => {
     try {
@@ -219,7 +217,6 @@ export default function CallsPage() {
               device={selected}
               number={number}
               onNumberChange={setNumber}
-              onCallRecord={handleCallRecord}
             />
           ) : (
             <div className="ui-card p-10 text-center text-sm text-gray-400">{t("请选择左侧设备查看详情")}</div>
@@ -280,8 +277,8 @@ export default function CallsPage() {
                             </span>
                           )}
                           <span className="block text-xs text-gray-500 dark:text-gray-400">
-                            {entry.direction === "incoming" ? t("来电") : t("呼出")} · {outcomeLabel(entry.outcome)} ·{" "}
-                            {formatTime(entry.startedAt)}
+                            {entry.direction === "incoming" ? t("来电") : t("呼出")} ·{" "}
+                            {outcomeLabel(entry.outcome, entry.direction)} · {formatTime(entry.startedAt)}
                             {entry.durationSeconds > 0 ? ` · ${formatDuration(entry.durationSeconds)}` : ""}
                           </span>
                         </button>
