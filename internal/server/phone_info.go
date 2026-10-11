@@ -8,26 +8,23 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
+
+	"vocat/internal/store"
 )
 
 // 号码归属地：后端代理请求 uapis.cn，避免在前端暴露 API Key。
-// API Key 存放于数据目录下的 phone-info.json，配置项见 phoneInfoConfig。
+// API Key 仅通过网页「设置」保存到数据库（app_settings 表），不再读取本地配置文件。
 const (
-	phoneInfoConfigFile = "phone-info.json"
+	phoneInfoSettingKey = "phone.info.api_key"
 	phoneInfoEndpoint   = "https://uapis.cn/api/v1/misc/phoneinfo"
 	phoneInfoCacheTTL   = 24 * time.Hour
 	phoneInfoMaxBody    = 64 << 10
+	phoneInfoMaxKeyLen  = 256
 )
 
 var phoneInfoHTTPClient = &http.Client{Timeout: 8 * time.Second}
-
-type phoneInfoConfig struct {
-	APIKey string `json:"api_key"`
-}
 
 type phoneInfoResult struct {
 	Province string `json:"province"`
@@ -41,32 +38,103 @@ type phoneInfoCacheEntry struct {
 	fetchedAt time.Time
 }
 
-// loadPhoneInfoConfig 读取数据目录下的 phone-info.json；文件缺失或损坏时返回空配置，
-// 不影响服务启动（接口仍可依赖访客积分访问）。
-func loadPhoneInfoConfig(dataDir string) phoneInfoConfig {
-	dataDir = strings.TrimSpace(dataDir)
-	if dataDir == "" {
-		return phoneInfoConfig{}
+// loadPhoneInfoAPIKey 从数据库加载归属地 API Key（启动时调用；设置页保存后也会即时刷新）。
+func (s *Server) loadPhoneInfoAPIKey(ctx context.Context) {
+	key := ""
+	if setting, err := s.store.AppSetting(ctx, phoneInfoSettingKey); err == nil {
+		var document struct {
+			APIKey string `json:"api_key"`
+		}
+		if json.Unmarshal(setting.Value, &document) == nil {
+			key = strings.TrimSpace(document.APIKey)
+		}
 	}
-	path := filepath.Join(dataDir, phoneInfoConfigFile)
-	file, err := os.Open(path)
-	if err != nil {
-		return phoneInfoConfig{}
-	}
-	defer file.Close()
-	decoder := json.NewDecoder(io.LimitReader(file, phoneInfoMaxBody))
-	var config phoneInfoConfig
-	if err := decoder.Decode(&config); err != nil {
-		return phoneInfoConfig{}
-	}
-	config.APIKey = strings.TrimSpace(config.APIKey)
-	return config
+	s.applyPhoneInfoKey(key)
+}
+
+func (s *Server) applyPhoneInfoKey(key string) {
+	s.phoneInfoMu.Lock()
+	s.phoneInfoAPIKey = key
+	s.phoneInfoCache = make(map[string]phoneInfoCacheEntry)
+	s.phoneInfoMu.Unlock()
 }
 
 func (s *Server) phoneInfoKey() string {
 	s.phoneInfoMu.RLock()
 	defer s.phoneInfoMu.RUnlock()
 	return s.phoneInfoAPIKey
+}
+
+func validatePhoneInfoKey(key string) error {
+	if key == "" {
+		return nil
+	}
+	if len(key) > phoneInfoMaxKeyLen {
+		return errors.New("api key is too long")
+	}
+	if strings.ContainsAny(key, "\x00\r\n") {
+		return errors.New("api key contains invalid characters")
+	}
+	return nil
+}
+
+// handlePhoneInfoSettings 读写归属地 API Key（设置页使用，不回传明文）。
+//
+//	GET /api/settings/phone-info  -> { configured }
+//	PUT /api/settings/phone-info  <- { api_key }（空字符串表示清除）
+func (s *Server) handlePhoneInfoSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.writePhoneInfoSettings(w)
+	case http.MethodPut:
+		var request struct {
+			APIKey *string `json:"api_key"`
+		}
+		if err := s.decodeJSON(w, r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		if request.APIKey == nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", "api_key is required")
+			return
+		}
+		key := strings.TrimSpace(*request.APIKey)
+		if err := validatePhoneInfoKey(key); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_api_key", err.Error())
+			return
+		}
+		if key == "" {
+			if err := s.store.DeleteAppSetting(r.Context(), phoneInfoSettingKey); err != nil && !errors.Is(err, store.ErrNotFound) {
+				s.writeStoreError(w, err)
+				return
+			}
+		} else {
+			value, err := json.Marshal(map[string]string{"api_key": key})
+			if err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+			if err := s.store.UpsertAppSetting(r.Context(), store.AppSetting{
+				Key:   phoneInfoSettingKey,
+				Value: value,
+			}); err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+		}
+		s.applyPhoneInfoKey(key)
+		s.recordAudit(r.Context(), "admin", "settings.phone_info.api_key", "settings", "phone-info", "success", "phone info api key updated")
+		s.writePhoneInfoSettings(w)
+	default:
+		w.Header().Set("Allow", "GET, PUT")
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+	}
+}
+
+func (s *Server) writePhoneInfoSettings(w http.ResponseWriter) {
+	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+		"configured": s.phoneInfoKey() != "",
+	}})
 }
 
 // handlePhoneInfo 返回号码归属地。

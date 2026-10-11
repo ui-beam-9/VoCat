@@ -50,7 +50,6 @@ type Options struct {
 	UpdateRepository    string
 	UpdateToken         string
 	HTTPS               *httpsmode.Manager
-	DataDir             string
 }
 
 // Server is the single HTTP handler for the JSON API and embedded SPA.
@@ -158,12 +157,12 @@ func New(options Options) (*Server, error) {
 		updateCheck:         update.CheckLatest,
 		updateApply:         update.ApplyLatest,
 		updateRestart:       update.RestartService,
-		phoneInfoAPIKey:     loadPhoneInfoConfig(options.DataDir).APIKey,
 		phoneInfoCache:      make(map[string]phoneInfoCacheEntry),
 	}
 	server.cellularDataRuntime()
 	server.loadAccessConfig(context.Background())
 	server.loadUILanguage(context.Background())
+	server.loadPhoneInfoAPIKey(context.Background())
 	server.loadLoggingConfig(context.Background())
 
 	mux := http.NewServeMux()

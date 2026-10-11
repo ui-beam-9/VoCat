@@ -32,6 +32,7 @@ import { SMSRateLimitCard } from "../components/settings/SMSRateLimitCard";
 import { SMSAutoClearCard } from "../components/settings/SMSAutoClearCard";
 
 import { VoWiFiMTUCard } from "../components/settings/VoWiFiMTUCard";
+import { PhoneInfoCard } from "../components/settings/PhoneInfoCard";
 
 const EMPTY_PASSWORD: PasswordForm = { oldPassword: "", newPassword: "", confirmPassword: "" };
 
@@ -511,6 +512,7 @@ export default function SettingsPage() {
           onSave={onSaveSecurity}
         />
         <VoWiFiMTUCard />
+        <PhoneInfoCard />
         <SMSAutoClearCard
           enabled={smsAutoClear}
           loading={loadingSMSSettings}
