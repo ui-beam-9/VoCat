@@ -1,0 +1,4 @@
+{
+  "_readme": "复制本文件为同目录下的 phone-info.json，并填入 uapis.cn 的 API Key。api_key 留空时后端仍可查询（访客额度），但不带 Authorization 头。",
+  "api_key": ""
+}
