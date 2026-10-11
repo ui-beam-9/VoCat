@@ -23,6 +23,7 @@ import {
   type CallHistoryEntry,
   type CallOutcome,
 } from "../lib/callHistory";
+import { fetchPhoneLocations } from "../lib/phoneInfo";
 import type { DeviceListItem, DevicesResponse } from "../types";
 
 const POLL_INTERVAL_MS = 5000;
@@ -125,6 +126,34 @@ export default function CallsPage() {
     for (const contact of savedContacts) map.set(contact.number, contact.name);
     return map;
   }, [savedContacts]);
+
+  // 归属地：为通话记录与通讯录中的号码批量解析（后端同号只查一次并缓存到数据库）。
+  const [locationByNumber, setLocationByNumber] = useState<Map<string, string>>(new Map());
+  const locationNumbersKey = useMemo(
+    () =>
+      [...new Set(
+        [...history.map((entry) => entry.number), ...savedContacts.map((contact) => contact.number)].filter(
+          (number) => number.trim() !== "",
+        ),
+      )]
+        .sort()
+        .join(","),
+    [history, savedContacts],
+  );
+  useEffect(() => {
+    const numbers = locationNumbersKey ? locationNumbersKey.split(",") : [];
+    if (numbers.length === 0) return;
+    let cancelled = false;
+    fetchPhoneLocations(numbers)
+      .then((map) => {
+        if (cancelled) return;
+        setLocationByNumber(new Map([...map].map(([number, info]) => [number, info.display])));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [locationNumbersKey]);
 
   // 通话记录由服务端实时写入，这里定期刷新以便近实时显示。
   useEffect(() => {
@@ -303,6 +332,7 @@ export default function CallsPage() {
                 <CallHistoryList
                   entries={history}
                   contactNameByNumber={contactNameByNumber}
+                  locationByNumber={locationByNumber}
                   outcomeLabel={outcomeLabel}
                   onDial={setNumber}
                   onSave={setSaveTarget}
@@ -313,6 +343,7 @@ export default function CallsPage() {
                 <CallContactsList
                   contacts={savedContacts}
                   loading={contactsLoading}
+                  locationByNumber={locationByNumber}
                   onDial={setNumber}
                   onEdit={setEditTarget}
                   onDelete={(contact) => void handleDeleteContact(contact)}

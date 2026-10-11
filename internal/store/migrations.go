@@ -538,6 +538,18 @@ func migrationStatements(version int) []string {
 			`CREATE UNIQUE INDEX IF NOT EXISTS call_history_call_id_idx
 				ON call_history(call_id) WHERE call_id <> ''`,
 		}
+	case 29:
+		return []string{
+			// 号码归属地 + 运营商缓存：同号只查一次上游接口，之后走数据库。
+			`CREATE TABLE IF NOT EXISTS phone_locations (
+				number TEXT PRIMARY KEY,
+				province TEXT NOT NULL DEFAULT '',
+				city TEXT NOT NULL DEFAULT '',
+				sp TEXT NOT NULL DEFAULT '',
+				area_code TEXT NOT NULL DEFAULT '',
+				updated_at INTEGER NOT NULL
+			)`,
+		}
 	default:
 		return nil
 	}

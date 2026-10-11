@@ -6,6 +6,7 @@ import type { CallDirection, CallHistoryEntry, CallOutcome } from "../../lib/cal
 export interface CallHistoryListProps {
   entries: CallHistoryEntry[];
   contactNameByNumber: Map<string, string>;
+  locationByNumber?: Map<string, string>;
   outcomeLabel: (outcome: CallOutcome, direction: CallDirection) => string;
   onDial: (number: string) => void;
   onSave: (entry: CallHistoryEntry) => void;
@@ -30,6 +31,7 @@ function formatTime(value: string): string {
 export function CallHistoryList({
   entries,
   contactNameByNumber,
+  locationByNumber,
   outcomeLabel,
   onDial,
   onSave,
@@ -66,6 +68,7 @@ export function CallHistoryList({
                 {entry.direction === "incoming" ? t("来电") : t("呼出")} ·{" "}
                 {outcomeLabel(entry.outcome, entry.direction)} · {formatTime(entry.startedAt)}
                 {entry.durationSeconds > 0 ? ` · ${formatDuration(entry.durationSeconds)}` : ""}
+                {locationByNumber?.get(entry.number) ? ` · ${locationByNumber.get(entry.number)}` : ""}
               </span>
             </button>
             <div className="flex shrink-0 items-center gap-2 text-xs">

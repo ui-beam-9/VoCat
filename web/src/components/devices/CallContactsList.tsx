@@ -6,6 +6,7 @@ import type { Contact } from "../../lib/contacts";
 export interface CallContactsListProps {
   contacts: Contact[];
   loading: boolean;
+  locationByNumber?: Map<string, string>;
   onDial: (number: string) => void;
   onEdit: (contact: Contact) => void;
   onDelete: (contact: Contact) => void;
@@ -18,6 +19,7 @@ const VISIBLE_ROWS_HEIGHT = 174;
 export function CallContactsList({
   contacts,
   loading,
+  locationByNumber,
   onDial,
   onEdit,
   onDelete,
@@ -41,7 +43,10 @@ export function CallContactsList({
         >
           <button type="button" onClick={() => onDial(contact.number)} className="min-w-0 flex-1 text-left">
             <span className="block truncate text-sm font-medium text-gray-900 dark:text-gray-100">{contact.name}</span>
-            <span className="block truncate font-mono text-[10px] text-gray-400">{contact.number}</span>
+            <span className="block truncate font-mono text-[10px] text-gray-400">
+              {contact.number}
+              {locationByNumber?.get(contact.number) ? `  · ${locationByNumber.get(contact.number)}` : ""}
+            </span>
           </button>
           <div className="flex shrink-0 items-center gap-2 text-xs">
             <button type="button" className="text-[#0ea5e9]" onClick={() => onDial(contact.number)}>

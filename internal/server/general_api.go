@@ -73,6 +73,8 @@ func (s *Server) routeGeneralAPI(w http.ResponseWriter, r *http.Request) bool {
 		s.handleDeveloperSettings(w, r)
 	case "phone-info":
 		s.handlePhoneInfo(w, r)
+	case "phone-info/batch":
+		s.handlePhoneInfoBatch(w, r)
 	default:
 		return false
 	}

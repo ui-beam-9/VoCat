@@ -258,6 +258,17 @@ type Contact struct {
 	UpdatedAt time.Time
 }
 
+// PhoneLocation caches a number's province/city/operator/area-code so it can be
+// resolved once and reused across calls, history, and contacts.
+type PhoneLocation struct {
+	Number    string
+	Province  string
+	City      string
+	Sp        string
+	AreaCode  string
+	UpdatedAt time.Time
+}
+
 type LocalProxyConfig struct {
 	ID          string
 	Name        string
