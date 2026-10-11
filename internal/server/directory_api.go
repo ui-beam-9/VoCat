@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -50,7 +51,12 @@ func parseRFC3339Seconds(value string) (time.Time, bool) {
 //	GET    /api/call-history?device_id=&limit=  list newest first
 //	POST   /api/call-history                    append one finished call
 //	DELETE /api/call-history?device_id=         clear (all devices when empty)
-func (s *Server) handleCallHistory(w http.ResponseWriter, r *http.Request) {
+//	DELETE /api/call-history/{id}               remove one entry
+func (s *Server) handleCallHistory(w http.ResponseWriter, r *http.Request, id string) {
+	if id != "" {
+		s.handleCallHistoryEntry(w, r, id)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		limit := 200
@@ -120,11 +126,34 @@ func (s *Server) handleCallHistory(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleCallHistoryEntry removes a single call log entry.
+//
+//	DELETE /api/call-history/{id}
+func (s *Server) handleCallHistoryEntry(w http.ResponseWriter, r *http.Request, rawID string) {
+	if !requireMethod(w, r, http.MethodDelete) {
+		return
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(rawID), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid_id", "call history id is invalid")
+		return
+	}
+	if err := s.store.DeleteCallHistoryEntry(r.Context(), id); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"deleted": true, "id": id}})
+}
+
 // handleContacts serves the saved address book:
 //
 //	GET  /api/contacts  list
 //	POST /api/contacts  create or rename one contact (keyed by number)
-func (s *Server) handleContacts(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleContacts(w http.ResponseWriter, r *http.Request, id string) {
+	if id != "" {
+		s.handleContactEntry(w, r, id)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		values, err := s.store.ListContacts(r.Context())
@@ -161,6 +190,50 @@ func (s *Server) handleContacts(w http.ResponseWriter, r *http.Request) {
 		})
 	default:
 		w.Header().Set("Allow", "GET, POST")
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+	}
+}
+
+// handleContactEntry edits or removes one contact.
+//
+//	PUT    /api/contacts/{id}  update name/number
+//	DELETE /api/contacts/{id}  remove
+func (s *Server) handleContactEntry(w http.ResponseWriter, r *http.Request, rawID string) {
+	id, err := strconv.ParseInt(strings.TrimSpace(rawID), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid_id", "contact id is invalid")
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		var request struct {
+			Name   string `json:"name"`
+			Number string `json:"number"`
+		}
+		if err := s.decodeJSON(w, r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		stored, err := s.store.UpdateContact(r.Context(), id, request.Name, request.Number)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not_found", "contact not found")
+				return
+			}
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"data": map[string]any{"entry": contactPayload(stored)},
+		})
+	case http.MethodDelete:
+		if err := s.store.DeleteContact(r.Context(), id); err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"deleted": true, "id": id}})
+	default:
+		w.Header().Set("Allow", "PUT, DELETE")
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
 }

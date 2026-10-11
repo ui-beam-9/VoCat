@@ -26,6 +26,7 @@ export interface VoWiFiCall {
   reason?: string;
   mediaReady?: boolean;
   codec?: string;
+  held?: boolean;
   endedAt?: string;
 }
 
@@ -66,6 +67,30 @@ export function answerCall(deviceId: string, callId: string) {
 
 export function hangupCall(deviceId: string, callId: string) {
   return api<CallActionResult>(`/devices/${encodeURIComponent(deviceId)}/calls/hangup`, {
+    method: "POST",
+    body: { callId },
+  });
+}
+
+// 通话中向对端发送一个 DTMF 按键（响应「请按 1/2/3 选择业务」这类语音菜单）。
+export function sendDtmf(deviceId: string, callId: string, digit: string) {
+  return api<CallActionResult>(`/devices/${encodeURIComponent(deviceId)}/calls/dtmf`, {
+    method: "POST",
+    body: { callId, digit },
+  });
+}
+
+// 通话保持（暂停）：re-INVITE 把 SDP 置为 sendonly。
+export function holdCall(deviceId: string, callId: string) {
+  return api<CallActionResult>(`/devices/${encodeURIComponent(deviceId)}/calls/hold`, {
+    method: "POST",
+    body: { callId },
+  });
+}
+
+// 取消保持（恢复通话）：re-INVITE 恢复 sendrecv。
+export function resumeCall(deviceId: string, callId: string) {
+  return api<CallActionResult>(`/devices/${encodeURIComponent(deviceId)}/calls/resume`, {
     method: "POST",
     body: { callId },
   });

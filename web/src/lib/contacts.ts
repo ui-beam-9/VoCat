@@ -23,3 +23,17 @@ export async function saveContact(name: string, number: string): Promise<Contact
   });
   return result.entry;
 }
+
+// 按 id 编辑联系人姓名/号码。
+export async function updateContact(id: number, name: string, number: string): Promise<Contact> {
+  const result = await api<{ entry: Contact }>(`/contacts/${id}`, {
+    method: "PUT",
+    body: { name, number },
+  });
+  return result.entry;
+}
+
+// 按 id 删除联系人。
+export async function deleteContact(id: number): Promise<void> {
+  await api(`/contacts/${id}`, { method: "DELETE" });
+}

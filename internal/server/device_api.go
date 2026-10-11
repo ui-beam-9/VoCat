@@ -727,7 +727,7 @@ func (s *Server) handleDevicePath(
 			return true
 		}
 		return s.handleCalls(w, r, config, physicalID)
-	case "calls/dial", "calls/answer", "calls/hangup":
+	case "calls/dial", "calls/answer", "calls/hangup", "calls/dtmf", "calls/hold", "calls/resume":
 		if !s.requirePhysicalDevice(w, physicalPresent) {
 			return true
 		}

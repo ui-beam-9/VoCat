@@ -5,13 +5,23 @@ import { validateCallNumber } from "./callApi";
 
 export interface SaveContactDialogProps {
   open: boolean;
+  initialName?: string;
   initialNumber: string;
+  // 标题默认为「保存为联系人」，编辑场景传入「编辑联系人」。
+  title?: string;
   onClose: () => void;
   onSave: (name: string, number: string) => void;
 }
 
-// 从通话记录保存为联系人：输入姓名并确认号码。
-export function SaveContactDialog({ open, initialNumber, onClose, onSave }: SaveContactDialogProps) {
+// 保存/编辑联系人：输入姓名并确认号码。
+export function SaveContactDialog({
+  open,
+  initialName = "",
+  initialNumber,
+  title,
+  onClose,
+  onSave,
+}: SaveContactDialogProps) {
   const { t } = useI18n();
   const [name, setName] = useState("");
   const [number, setNumber] = useState("");
@@ -19,11 +29,11 @@ export function SaveContactDialog({ open, initialNumber, onClose, onSave }: Save
 
   useEffect(() => {
     if (open) {
-      setName("");
+      setName(initialName);
       setNumber(initialNumber || "");
       setError("");
     }
-  }, [open, initialNumber]);
+  }, [open, initialName, initialNumber]);
 
   function handleSave() {
     const trimmedName = name.trim();
@@ -43,7 +53,7 @@ export function SaveContactDialog({ open, initialNumber, onClose, onSave }: Save
     <Modal
       open={open}
       onClose={onClose}
-      title={t("保存为联系人")}
+      title={title ?? t("保存为联系人")}
       footer={
         <>
           <Button onClick={onClose}>{t("取消")}</Button>

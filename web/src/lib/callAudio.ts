@@ -10,6 +10,8 @@ export type CallAudioState = "connecting" | "live" | "closed" | "error";
 
 export interface CallAudioEvents {
   onState?: (state: CallAudioState, detail?: string) => void;
+  // 麦克风实时电平（RMS，0~1），用于音量波动条。
+  onMicLevel?: (level: number) => void;
 }
 
 const TARGET_SAMPLE_RATE = 8000;
@@ -277,6 +279,10 @@ export class CallAudioSession {
   private source?: MediaStreamAudioSourceNode;
   private captureNode?: AudioWorkletNode;
   private playbackNode?: AudioWorkletNode;
+  private gainNode?: GainNode;
+  private analyserNode?: AnalyserNode;
+  private levelTimer?: number;
+  private micGain = 1;
   private closed = false;
   private wsFailed = false;
 
@@ -286,6 +292,29 @@ export class CallAudioSession {
     private readonly events: CallAudioEvents = {},
     private readonly route: CallAudioRouteOptions = {},
   ) {}
+
+  // 调整上行麦克风增益（0~2，1 为原始音量）。
+  setMicGain(value: number): void {
+    this.micGain = Math.max(0, Math.min(2, value));
+    if (this.gainNode) this.gainNode.gain.value = this.micGain;
+  }
+
+  private startLevelMeter(): void {
+    const analyser = this.analyserNode;
+    if (!analyser) return;
+    const buffer = new Float32Array(analyser.fftSize);
+    const tick = () => {
+      if (this.closed || !this.analyserNode) return;
+      this.analyserNode.getFloatTimeDomainData(buffer);
+      let sum = 0;
+      for (let index = 0; index < buffer.length; index += 1) {
+        sum += buffer[index] * buffer[index];
+      }
+      this.events.onMicLevel?.(Math.sqrt(sum / buffer.length));
+      this.levelTimer = window.setTimeout(tick, 100);
+    };
+    tick();
+  }
 
   async start(): Promise<void> {
     this.events.onState?.("connecting");
@@ -327,13 +356,23 @@ export class CallAudioSession {
       this.playbackNode = playback;
 
       this.source = ctx.createMediaStreamSource(this.stream);
-      this.source.connect(capture);
+      // 麦克风增益 + 电平分析：source → gain → capture，同时旁路接入 analyser 做电平检测。
+      const gain = ctx.createGain();
+      gain.gain.value = this.micGain;
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      this.gainNode = gain;
+      this.analyserNode = analyser;
+      this.source.connect(analyser);
+      this.source.connect(gain);
+      gain.connect(capture);
       capture.port.onmessage = (event: MessageEvent<ArrayBuffer>) => {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
           this.ws.send(event.data);
         }
       };
       playback.connect(ctx.destination);
+      this.startLevelMeter();
 
       const ws = new WebSocket(callMediaURL(this.deviceId, this.callId));
       ws.binaryType = "arraybuffer";
@@ -375,6 +414,10 @@ export class CallAudioSession {
   stop(): void {
     if (this.closed) return;
     this.closed = true;
+    if (this.levelTimer !== undefined) {
+      window.clearTimeout(this.levelTimer);
+      this.levelTimer = undefined;
+    }
     try {
       this.ws?.close();
     } catch {
@@ -387,6 +430,8 @@ export class CallAudioSession {
     }
     try {
       this.source?.disconnect();
+      this.gainNode?.disconnect();
+      this.analyserNode?.disconnect();
       this.captureNode?.disconnect();
       this.playbackNode?.disconnect();
     } catch {

@@ -60,6 +60,8 @@ func (s *Server) handleCallAction(w http.ResponseWriter, r *http.Request, config
 	duration := time.Duration(0)
 	number := ""
 	callID := ""
+	digit := ""
+	hold := false
 	switch action {
 	case "dial":
 		var request struct {
@@ -101,6 +103,32 @@ func (s *Server) handleCallAction(w http.ResponseWriter, r *http.Request, config
 		}
 		callID = strings.TrimSpace(request.CallID)
 		command = "ATH"
+	case "dtmf":
+		var request struct {
+			CallID string `json:"call_id"`
+			Digit  string `json:"digit"`
+		}
+		if err := s.decodeJSON(w, r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return true
+		}
+		callID = strings.TrimSpace(request.CallID)
+		digit = strings.TrimSpace(request.Digit)
+		if len(digit) != 1 || !strings.ContainsAny(digit, "0123456789*#") {
+			writeError(w, http.StatusBadRequest, "invalid_digit", "digit must be one of 0-9, *, #")
+			return true
+		}
+		command = "AT+VTS=" + digit
+	case "hold", "resume":
+		var request struct {
+			CallID string `json:"call_id"`
+		}
+		if err := s.decodeJSON(w, r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return true
+		}
+		callID = strings.TrimSpace(request.CallID)
+		hold = action == "hold"
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "call action not found")
 		return true
@@ -128,6 +156,16 @@ func (s *Server) handleCallAction(w http.ResponseWriter, r *http.Request, config
 			if err == nil {
 				err = controller.HangupCall(r.Context(), config.ID, callID)
 			}
+		case "dtmf":
+			callID, err = resolveVoWiFiCallID(controller, config.ID, callID, "active")
+			if err == nil {
+				err = controller.SendDTMF(r.Context(), config.ID, callID, digit)
+			}
+		case "hold", "resume":
+			callID, err = resolveVoWiFiCallID(controller, config.ID, callID, "active")
+			if err == nil {
+				result, err = controller.SetCallHold(r.Context(), config.ID, callID, hold)
+			}
 		}
 		if err != nil {
 			s.logger.Warn("VoWiFi call operation failed",
@@ -151,6 +189,10 @@ func (s *Server) handleCallAction(w http.ResponseWriter, r *http.Request, config
 			"accepted": true, "action": action, "number": number, "call_id": callID,
 			"duration_seconds": int(duration / time.Second), "transport": transport, "call": result,
 		}})
+		return true
+	}
+	if action == "hold" || action == "resume" {
+		writeError(w, http.StatusNotImplemented, "call_hold_unavailable", "call hold requires an active VoWiFi IMS session")
 		return true
 	}
 	operationContext, cancel := context.WithTimeout(r.Context(), 20*time.Second)

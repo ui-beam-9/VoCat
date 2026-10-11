@@ -328,6 +328,101 @@ func (session *Session) HangupCall(ctx context.Context, id string) error {
 	return err
 }
 
+// SendDTMF 通过 SIP INFO（application/dtmf-relay）向对端发送单个按键音，
+// 用于在接通后响应「请按 1/2/3 选择业务」这类交互式语音菜单。
+func (session *Session) SendDTMF(ctx context.Context, id, digit string) error {
+	digit = strings.TrimSpace(digit)
+	if len(digit) != 1 || !strings.ContainsRune("0123456789*#", rune(digit[0])) {
+		return errors.New("ims: invalid DTMF digit")
+	}
+	session.callMu.Lock()
+	call := session.calls[id]
+	if call == nil {
+		session.callMu.Unlock()
+		return ErrCallNotFound
+	}
+	state := call.public.State
+	session.callMu.Unlock()
+	if state != "active" {
+		return ErrCallState
+	}
+	body := []byte("Signal=" + digit + "\r\nDuration=160\r\n")
+	return session.sendDialogBody(ctx, call, "INFO", "application/dtmf-relay", body, nil)
+}
+
+// SetCallHold 通过 re-INVITE 把通话置为保持（SDP a=sendonly）或恢复（a=sendrecv）。
+func (session *Session) SetCallHold(ctx context.Context, id string, hold bool) (vowifi.Call, error) {
+	session.callMu.Lock()
+	call := session.calls[id]
+	if call == nil {
+		session.callMu.Unlock()
+		return vowifi.Call{}, ErrCallNotFound
+	}
+	if call.public.State != "active" || call.media == nil {
+		session.callMu.Unlock()
+		return vowifi.Call{}, ErrCallState
+	}
+	sessionExpires := call.sessionExpires
+	session.callMu.Unlock()
+
+	body := call.media.holdSDP(session.localMediaIP(), hold)
+	extra := []string(nil)
+	if sessionExpires > 0 {
+		extra = append(extra, fmt.Sprintf("Session-Expires: %d;refresher=uac", sessionExpires))
+	}
+	session.mu.Lock()
+	cseq := session.cseq
+	session.cseq++
+	session.mu.Unlock()
+	request := session.buildDialogMessage(call, "INVITE", cseq, "application/sdp", extra, body)
+	response, err := session.exchangeRuntime(ctx, request, sipTransactionKey{callID: call.callID, cseq: cseq, method: "INVITE"})
+	if err != nil {
+		return vowifi.Call{}, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return vowifi.Call{}, fmt.Errorf("ims: SIP re-INVITE rejected with %d", response.StatusCode)
+	}
+	// 2xx 的 re-INVITE 必须用相同 CSeq 回 ACK，否则对端会持续重传最终响应。
+	ack := session.buildDialogMessage(call, "ACK", cseq, "", nil, nil)
+	session.writeMu.Lock()
+	_, _ = session.conn.Write(ack)
+	session.writeMu.Unlock()
+
+	session.callMu.Lock()
+	if current := session.calls[id]; current != nil {
+		current.public.Held = hold
+		result := current.public
+		session.callMu.Unlock()
+		return result, nil
+	}
+	session.callMu.Unlock()
+	return vowifi.Call{}, ErrCallNotFound
+}
+
+// sendDialogBody 发送带正文的对话内请求并等待 2xx 响应。
+func (session *Session) sendDialogBody(
+	ctx context.Context,
+	call *imsCall,
+	method string,
+	contentType string,
+	body []byte,
+	extraHeaders []string,
+) error {
+	session.mu.Lock()
+	cseq := session.cseq
+	session.cseq++
+	session.mu.Unlock()
+	request := session.buildDialogMessage(call, method, cseq, contentType, extraHeaders, body)
+	response, err := session.exchangeRuntime(ctx, request, sipTransactionKey{callID: call.callID, cseq: cseq, method: method})
+	if err != nil {
+		return err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("ims: SIP %s rejected with %d", method, response.StatusCode)
+	}
+	return nil
+}
+
 func (session *Session) callWasTerminated(id string) bool {
 	session.callMu.Lock()
 	defer session.callMu.Unlock()
@@ -692,6 +787,18 @@ func (session *Session) sendDialogRequest(ctx context.Context, call *imsCall, me
 }
 
 func (session *Session) buildDialogRequest(call *imsCall, method string, cseq uint32) []byte {
+	return session.buildDialogMessage(call, method, cseq, "", nil, nil)
+}
+
+// buildDialogMessage 构造对话内请求，支持附带正文（INFO 的 DTMF、re-INVITE 的 SDP）。
+func (session *Session) buildDialogMessage(
+	call *imsCall,
+	method string,
+	cseq uint32,
+	contentType string,
+	extraHeaders []string,
+	body []byte,
+) []byte {
 	branch, _ := randomHex(12)
 	if method == "CANCEL" {
 		branch = call.branch
@@ -727,14 +834,26 @@ func (session *Session) buildDialogRequest(call *imsCall, method string, cseq ui
 	if method != "CANCEL" {
 		lines = session.appendPAccessNetworkInfoHeader(lines)
 	}
-	if method == "UPDATE" {
+	if method == "UPDATE" || (method == "INVITE" && len(body) > 0) {
 		lines = append(lines, session.dialogContactHeader())
 	}
-	lines = append(lines, "Content-Length: 0", "", "")
 	if method == "UPDATE" && call.sessionExpires > 0 {
-		lines = append(lines[:len(lines)-3], fmt.Sprintf("Session-Expires: %d;refresher=uac", call.sessionExpires), "Content-Length: 0", "", "")
+		lines = append(lines, fmt.Sprintf("Session-Expires: %d;refresher=uac", call.sessionExpires))
 	}
-	return []byte(strings.Join(lines, "\r\n"))
+	for _, header := range extraHeaders {
+		if strings.TrimSpace(header) != "" {
+			lines = append(lines, header)
+		}
+	}
+	if contentType != "" {
+		lines = append(lines, "Content-Type: "+contentType)
+	}
+	lines = append(lines, "Content-Length: "+strconv.Itoa(len(body)), "", "")
+	message := []byte(strings.Join(lines, "\r\n"))
+	if len(body) == 0 {
+		return message
+	}
+	return append(message, body...)
 }
 
 func (session *Session) localMediaIP() net.IP {

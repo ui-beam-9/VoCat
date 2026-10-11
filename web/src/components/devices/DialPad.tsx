@@ -1,6 +1,7 @@
 import { cx } from "../../lib/utils";
 
 // 电话号码键盘：1-9 / * / 0 / #，外加 +、退格与呼叫按钮。
+// 通话中（mode="dtmf"）时隐藏 +/退格，按键直接作为 DTMF 发送，主按钮变为挂断。
 const KEYS: Array<{ key: string; sub?: string }> = [
   { key: "1" },
   { key: "2", sub: "ABC" },
@@ -25,6 +26,9 @@ export interface DialPadProps {
   disabled?: boolean;
   callDisabled?: boolean;
   className?: string;
+  // "dial"：普通拨号；"dtmf"：通话中发送按键音。
+  mode?: "dial" | "dtmf";
+  callVariant?: "primary" | "danger";
 }
 
 export function DialPad({
@@ -36,7 +40,10 @@ export function DialPad({
   disabled = false,
   callDisabled = false,
   className,
+  mode = "dial",
+  callVariant = "primary",
 }: DialPadProps) {
+  const dtmf = mode === "dtmf";
   return (
     <div className={cx("select-none", className)}>
       <div className="grid grid-cols-3 gap-2">
@@ -56,29 +63,36 @@ export function DialPad({
           </button>
         ))}
       </div>
-      <div className="mt-2 grid grid-cols-2 gap-2">
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={onPlus}
-          className="inline-flex h-10 items-center justify-center rounded-xl border border-gray-200 bg-white text-lg font-medium text-gray-800 transition-colors hover:bg-gray-50 active:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
-        >
-          +
-        </button>
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={onBackspace}
-          className="inline-flex h-10 items-center justify-center rounded-xl border border-gray-200 bg-white text-lg font-medium text-gray-800 transition-colors hover:bg-gray-50 active:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
-        >
-          ⌫
-        </button>
-      </div>
+      {!dtmf ? (
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={onPlus}
+            className="inline-flex h-10 items-center justify-center rounded-xl border border-gray-200 bg-white text-lg font-medium text-gray-800 transition-colors hover:bg-gray-50 active:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
+          >
+            +
+          </button>
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={onBackspace}
+            className="inline-flex h-10 items-center justify-center rounded-xl border border-gray-200 bg-white text-lg font-medium text-gray-800 transition-colors hover:bg-gray-50 active:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
+          >
+            ⌫
+          </button>
+        </div>
+      ) : null}
       <button
         type="button"
         disabled={callDisabled}
         onClick={onCall}
-        className="mt-2 inline-flex h-11 w-full items-center justify-center rounded-xl border border-transparent bg-[#67c23a] text-sm font-medium text-white transition-colors hover:bg-[#85ce61] active:bg-[#5daf34] disabled:cursor-not-allowed disabled:opacity-60"
+        className={cx(
+          "mt-2 inline-flex h-11 w-full items-center justify-center rounded-xl border border-transparent text-sm font-medium text-white transition-colors disabled:cursor-not-allowed disabled:opacity-60",
+          callVariant === "danger"
+            ? "bg-[#f56c6c] hover:bg-[#f78989] active:bg-[#dd6161]"
+            : "bg-[#67c23a] hover:bg-[#85ce61] active:bg-[#5daf34]",
+        )}
       >
         {callLabel}
       </button>

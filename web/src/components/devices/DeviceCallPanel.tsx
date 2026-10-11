@@ -7,7 +7,10 @@ import {
   answerCall,
   dialCall,
   hangupCall,
+  holdCall,
   listCalls,
+  resumeCall,
+  sendDtmf,
   validateCallNumber,
   type CallState,
   type VoWiFiCall,
@@ -23,6 +26,7 @@ import {
   type AudioDeviceInfo,
   type CallAudioState,
 } from "../../lib/callAudio";
+import { fetchPhoneInfo } from "../../lib/phoneInfo";
 import { DialPad } from "./DialPad";
 
 const POLL_INTERVAL_MS = 2000;
@@ -50,6 +54,15 @@ function isLiveCall(state: CallState): boolean {
   return state !== "ended" && state !== "failed";
 }
 
+function formatCallDuration(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = seconds % 60;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(rest)}` : `${pad(minutes)}:${pad(rest)}`;
+}
+
 export interface DeviceCallPanelProps {
   device: { id: string };
   // 可选受控号码：供通讯录/通话记录回填。未提供时组件内部自管。
@@ -71,6 +84,14 @@ export function DeviceCallPanel({
   const [audioState, setAudioState] = useState<CallAudioState | "idle">("idle");
   const [internalNumber, setInternalNumber] = useState("");
   const [busy, setBusy] = useState(false);
+  const [holdBusy, setHoldBusy] = useState(false);
+  // 麦克风电平与增益（仅在通话中展示）。
+  const [micLevel, setMicLevel] = useState(0);
+  const [micGain, setMicGain] = useState(1);
+  // 通话时长计时器与号码归属地。
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const [phoneInfoText, setPhoneInfoText] = useState("");
+  const [phoneInfoLoading, setPhoneInfoLoading] = useState(false);
   // 音频诊断：设备选择与测试状态
   const [inputDevices, setInputDevices] = useState<AudioDeviceInfo[]>([]);
   const [outputDevices, setOutputDevices] = useState<AudioDeviceInfo[]>([]);
@@ -84,6 +105,7 @@ export function DeviceCallPanel({
   const sessionRef = useRef<CallAudioSession | null>(null);
   const sessionCallIdRef = useRef<string>("");
   const routeRef = useRef<{ inputDeviceId?: string; outputDeviceId?: string }>({});
+  const micGainRef = useRef(1);
 
   const deviceId = device.id;
   const number = numberProp ?? internalNumber;
@@ -164,6 +186,12 @@ export function DeviceCallPanel({
     };
   }, [selectedInput, selectedOutput]);
 
+  // 麦克风增益存 ref，便于新建音频会话时套用当前值。
+  useEffect(() => {
+    micGainRef.current = micGain;
+    sessionRef.current?.setMicGain(micGain);
+  }, [micGain]);
+
   // 打开诊断面板时枚举一次设备（未授权时 label 可能为空）。
   useEffect(() => {
     if (diagOpen) void refreshDevices();
@@ -197,10 +225,57 @@ export function DeviceCallPanel({
     () => calls.find((call) => call.state === "active"),
     [calls],
   );
-  const incomingCall = useMemo(
-    () => calls.find((call) => call.state === "ringing" && call.direction === "incoming"),
-    [calls],
+  const liveCalls = useMemo(() => calls.filter((call) => isLiveCall(call.state)), [calls]);
+  // 主按钮可挂断的通话：优先已接通，其次是呼出中的通话。
+  const controllableCall = useMemo(
+    () =>
+      activeCall
+      ?? liveCalls.find((call) => call.direction === "outgoing"),
+    [activeCall, liveCalls],
   );
+
+  const activeCallId = activeCall?.id ?? "";
+  const activeCallStarted = activeCall?.answeredAt || activeCall?.startedAt || "";
+
+  // 通话中每秒刷新一次计时，用于显示通话时长。
+  useEffect(() => {
+    if (!activeCallId) return;
+    setNowTick(Date.now());
+    const timer = window.setInterval(() => setNowTick(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [activeCallId]);
+
+  const callDurationSeconds = useMemo(() => {
+    if (!activeCallStarted) return 0;
+    const started = new Date(activeCallStarted).getTime();
+    if (Number.isNaN(started)) return 0;
+    return Math.max(0, Math.floor((nowTick - started) / 1000));
+  }, [activeCallStarted, nowTick]);
+
+  // 通话接通后查询号码归属地（结果在 lib/phoneInfo 内缓存）。
+  useEffect(() => {
+    const target = (activeCall?.number ?? "").trim();
+    if (!target) {
+      setPhoneInfoText("");
+      setPhoneInfoLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setPhoneInfoLoading(true);
+    fetchPhoneInfo(target)
+      .then((info) => {
+        if (!cancelled) setPhoneInfoText(info.display || "");
+      })
+      .catch(() => {
+        if (!cancelled) setPhoneInfoText("");
+      })
+      .finally(() => {
+        if (!cancelled) setPhoneInfoLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeCall?.number]);
 
   // 通话接通后建立音频桥，通话结束或切换通话时释放。
   useEffect(() => {
@@ -219,12 +294,15 @@ export function DeviceCallPanel({
           onState: (state, detail) => {
             setAudioState(state);
             if (state === "error") setMediaError(detail || t("音频连接失败"));
+            if (state === "closed") setMicLevel(0);
           },
+          onMicLevel: (level) => setMicLevel(level),
         },
         routeRef.current,
       );
       sessionRef.current = session;
       sessionCallIdRef.current = activeCall.id;
+      session.setMicGain(micGainRef.current);
       session.start().catch((err) => {
         setMediaError(err instanceof Error ? err.message : String(err));
         setAudioState("error");
@@ -254,6 +332,7 @@ export function DeviceCallPanel({
     sessionRef.current = null;
     sessionCallIdRef.current = "";
     setAudioState("idle");
+    setMicLevel(0);
   }, []);
 
   const handleDial = useCallback(async () => {
@@ -307,7 +386,41 @@ export function DeviceCallPanel({
     [deviceId, refresh, stopMedia],
   );
 
-  const liveCalls = calls.filter((call) => isLiveCall(call.state));
+  const handleToggleHold = useCallback(async () => {
+    if (!activeCall) return;
+    setHoldBusy(true);
+    setError("");
+    try {
+      if (activeCall.held) await resumeCall(deviceId, activeCall.id);
+      else await holdCall(deviceId, activeCall.id);
+      await refresh();
+    } catch (err) {
+      setError(apiMessage(err));
+    } finally {
+      setHoldBusy(false);
+    }
+  }, [activeCall, deviceId, refresh]);
+
+  // 通话中按拨号盘发送 DTMF；未通话时正常拼接到号码。
+  const handleDigit = useCallback(
+    (digit: string) => {
+      if (activeCall) {
+        setError("");
+        void sendDtmf(deviceId, activeCall.id, digit).catch((err) => {
+          setError(apiMessage(err));
+        });
+        return;
+      }
+      setNumber(number + digit);
+    },
+    [activeCall, deviceId, number, setNumber],
+  );
+
+  const handlePrimaryCall = useCallback(() => {
+    if (controllableCall) void handleHangup(controllableCall);
+    else void handleDial();
+  }, [controllableCall, handleDial, handleHangup]);
+
   const audioTone: "success" | "warning" | "danger" | "neutral" =
     audioState === "live" ? "success" : audioState === "connecting" ? "warning" : audioState === "error" ? "danger" : "neutral";
   const audioLabel =
@@ -452,21 +565,59 @@ export function DeviceCallPanel({
         value={number}
         onChange={(event) => setNumber(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === "Enter" && !busy && voWiFiReady) void handleDial();
+          if (event.key === "Enter" && !busy && voWiFiReady && !controllableCall) void handleDial();
         }}
         placeholder={t("输入号码，如 10086 或 +8613800000000")}
-        disabled={!voWiFiReady || busy}
+        disabled={!voWiFiReady || busy || !!activeCall}
       />
       <DialPad
         className="mt-3"
+        mode={activeCall ? "dtmf" : "dial"}
         disabled={!voWiFiReady || busy}
         callDisabled={!voWiFiReady || busy || !loaded}
-        callLabel={t("拨号")}
-        onDigit={(digit) => setNumber(number + digit)}
+        callVariant={controllableCall ? "danger" : "primary"}
+        callLabel={controllableCall ? t("挂断") : t("拨号")}
+        onDigit={handleDigit}
         onPlus={() => setNumber(number + "+")}
         onBackspace={() => setNumber(number.slice(0, -1))}
-        onCall={() => void handleDial()}
+        onCall={handlePrimaryCall}
       />
+
+      {activeCall ? (
+        <div className="mt-3 space-y-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300">
+          <div className="flex items-center gap-2">
+            <span className="w-14 shrink-0 text-gray-500 dark:text-gray-400">{t("麦克风")}</span>
+            <div className="h-2 flex-1 overflow-hidden rounded bg-gray-200 dark:bg-white/10">
+              <div
+                className="h-full bg-emerald-500 transition-[width] duration-75"
+                style={{ width: `${Math.min(100, Math.round(micLevel * 500))}%` }}
+              />
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="w-14 shrink-0 text-gray-500 dark:text-gray-400">{t("音量")}</span>
+            <input
+              type="range"
+              min={0}
+              max={2}
+              step={0.1}
+              value={micGain}
+              onChange={(event) => setMicGain(Number(event.target.value))}
+              className="h-1.5 flex-1 cursor-pointer accent-[#0ea5e9]"
+              aria-label={t("麦克风音量")}
+            />
+            <span className="w-10 shrink-0 text-right font-mono">{Math.round(micGain * 100)}%</span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-gray-500 dark:text-gray-400">
+              {t("通话时长")} <span className="font-mono text-gray-700 dark:text-gray-200">{formatCallDuration(callDurationSeconds)}</span>
+            </span>
+            <Button size="small" loading={holdBusy} onClick={() => void handleToggleHold()}>
+              {activeCall.held ? t("恢复通话") : t("暂停通话")}
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       {liveCalls.length > 0 ? (
         <div className="mt-3 space-y-2">
@@ -488,17 +639,27 @@ export function DeviceCallPanel({
                   </div>
                   <div className="text-xs text-gray-500 dark:text-gray-400">
                     {call.direction === "incoming" ? t("来电") : t("呼出")} · {callStateLabel(call.state, call.direction, t)}
+                    {call.state === "active" ? ` · ${formatCallDuration(
+                      Math.max(0, Math.floor((nowTick - new Date(call.answeredAt || call.startedAt || Date.now()).getTime()) / 1000)),
+                    )}` : ""}
+                    {call.held ? ` · ${t("已暂停")}` : ""}
                   </div>
                 </div>
-                <div className="flex shrink-0 gap-2">
+                <div className="flex shrink-0 items-center gap-2">
                   {isIncomingRinging ? (
-                    <Button variant="success" size="small" disabled={busy || !voWiFiReady} onClick={() => void handleAnswer(call)}>
-                      {t("接听")}
-                    </Button>
-                  ) : null}
-                  <Button variant="danger" size="small" disabled={busy} onClick={() => void handleHangup(call)}>
-                    {t("挂断")}
-                  </Button>
+                    <>
+                      <Button variant="success" size="small" disabled={busy || !voWiFiReady} onClick={() => void handleAnswer(call)}>
+                        {t("接听")}
+                      </Button>
+                      <Button variant="danger" size="small" disabled={busy} onClick={() => void handleHangup(call)}>
+                        {t("挂断")}
+                      </Button>
+                    </>
+                  ) : (
+                    <span className="max-w-[12rem] truncate text-xs text-gray-500 dark:text-gray-400" title={phoneInfoText}>
+                      {phoneInfoLoading ? t("归属地查询中…") : phoneInfoText || t("归属地未知")}
+                    </span>
+                  )}
                 </div>
               </div>
             );

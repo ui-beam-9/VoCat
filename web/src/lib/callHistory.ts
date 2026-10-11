@@ -28,3 +28,8 @@ export async function clearCallHistory(deviceId?: string): Promise<void> {
   const suffix = deviceId ? `?device_id=${encodeURIComponent(deviceId)}` : "";
   await api(`/call-history${suffix}`, { method: "DELETE" });
 }
+
+// 删除单条通话记录。
+export async function deleteCallHistoryEntry(id: number): Promise<void> {
+  await api(`/call-history/${id}`, { method: "DELETE" });
+}

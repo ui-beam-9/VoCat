@@ -1,49 +1,57 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api, apiMessage } from "../api";
 import { useI18n } from "../lib/i18n";
-import { Button, PageHeader, StatusDot, Tabs, message } from "../components/ui";
+import { Button, PageHeader, StatusDot, Tabs, confirmDialog, message } from "../components/ui";
 import { DeviceCallPanel } from "../components/devices/DeviceCallPanel";
+import { CallHistoryList } from "../components/devices/CallHistoryList";
+import { CallContactsList } from "../components/devices/CallContactsList";
 import { SaveContactDialog } from "../components/devices/SaveContactDialog";
-import { listContacts } from "../components/sms/smsApi";
 import { cx } from "../lib/utils";
-import { fetchContacts, saveContact, type Contact } from "../lib/contacts";
+import {
+  deleteContact,
+  fetchContacts,
+  saveContact,
+  updateContact,
+  type Contact,
+} from "../lib/contacts";
 import {
   clearCallHistory,
+  deleteCallHistoryEntry,
   fetchCallHistory,
   type CallDirection,
   type CallHistoryEntry,
   type CallOutcome,
 } from "../lib/callHistory";
-import type { DeviceListItem, DevicesResponse, SMSContact } from "../types";
+import type { DeviceListItem, DevicesResponse } from "../types";
 
 const POLL_INTERVAL_MS = 5000;
 
-function formatDuration(seconds: number): string {
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  return `${minutes}:${String(rest).padStart(2, "0")}`;
-}
-
-function formatTime(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-}
-
 // 全局"语音通话"页：设备选择 + 拨号盘 + 通话记录 + 通讯录。
-// 音频依赖 VoWiFi（IMS 已注册）；通话记录仅存本地浏览器。
+// 音频依赖 VoWiFi（IMS 已注册）；通话记录与本地通讯录均存服务端。
 export default function CallsPage() {
   const { t } = useI18n();
+  const [searchParams] = useSearchParams();
   const [devices, setDevices] = useState<DeviceListItem[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [number, setNumber] = useState("");
   const [tab, setTab] = useState<"history" | "contacts">("history");
   const [history, setHistory] = useState<CallHistoryEntry[]>([]);
   const [savedContacts, setSavedContacts] = useState<Contact[]>([]);
-  const [saveTarget, setSaveTarget] = useState<CallHistoryEntry | null>(null);
-  const [contacts, setContacts] = useState<SMSContact[]>([]);
   const [contactsLoading, setContactsLoading] = useState(false);
+  const [deletingHistoryId, setDeletingHistoryId] = useState<number | null>(null);
+  const [deletingContactId, setDeletingContactId] = useState<number | null>(null);
+  const [saveTarget, setSaveTarget] = useState<CallHistoryEntry | null>(null);
+  const [editTarget, setEditTarget] = useState<Contact | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  // ?device=<id> 只应用一次，之后用户在页面内切换设备不会被轮询覆盖。
+  const requestedDeviceRef = useRef((searchParams.get("device") || "").trim());
+
+  useEffect(() => {
+    const requested = (searchParams.get("device") || "").trim();
+    if (requested) requestedDeviceRef.current = requested;
+  }, [searchParams]);
 
   const refreshDevices = useCallback(async () => {
     try {
@@ -52,9 +60,13 @@ export default function CallsPage() {
       const list = (res.devices ?? []).filter((device) => device.deviceType !== "wifi_410");
       setDevices(list);
       setError("");
-      setSelectedId((current) =>
-        current && list.some((device) => device.id === current) ? current : list[0]?.id ?? "",
-      );
+      const requested = requestedDeviceRef.current;
+      requestedDeviceRef.current = "";
+      setSelectedId((current) => {
+        const desired = requested || current;
+        if (desired && list.some((device) => device.id === desired)) return desired;
+        return current && list.some((device) => device.id === current) ? current : list[0]?.id ?? "";
+      });
     } catch (err) {
       setError(apiMessage(err));
     } finally {
@@ -84,10 +96,13 @@ export default function CallsPage() {
   }, []);
 
   const refreshSavedContacts = useCallback(async () => {
+    setContactsLoading(true);
     try {
       setSavedContacts(await fetchContacts());
     } catch {
       setSavedContacts([]);
+    } finally {
+      setContactsLoading(false);
     }
   }, []);
 
@@ -95,23 +110,6 @@ export default function CallsPage() {
     void refreshHistory();
     void refreshSavedContacts();
   }, [refreshHistory, refreshSavedContacts]);
-
-  const loadContacts = useCallback(async () => {
-    if (!selectedId) return;
-    setContactsLoading(true);
-    try {
-      setContacts(await listContacts(selectedId));
-    } catch {
-      setContacts([]);
-    } finally {
-      setContactsLoading(false);
-    }
-  }, [selectedId]);
-
-  useEffect(() => {
-    if (tab !== "contacts") return;
-    void loadContacts();
-  }, [tab, loadContacts]);
 
   const outcomeLabel = useCallback(
     (outcome: CallOutcome, direction: CallDirection) => {
@@ -145,10 +143,47 @@ export default function CallsPage() {
     }
   }, []);
 
-  const handleSaveContact = useCallback(
-    async (name: string, number: string) => {
+  const handleDeleteHistory = useCallback(
+    async (entry: CallHistoryEntry) => {
+      setDeletingHistoryId(entry.id);
       try {
-        await saveContact(name, number);
+        await deleteCallHistoryEntry(entry.id);
+        setHistory((current) => current.filter((item) => item.id !== entry.id));
+      } catch (err) {
+        message.error(apiMessage(err));
+      } finally {
+        setDeletingHistoryId(null);
+      }
+    },
+    [],
+  );
+
+  const handleDeleteContact = useCallback(
+    async (contact: Contact) => {
+      const ok = await confirmDialog(t("确定删除该联系人？"), t("删除联系人"), {
+        confirmText: t("删除"),
+        cancelText: t("取消"),
+        type: "warning",
+      });
+      if (!ok) return;
+      setDeletingContactId(contact.id);
+      try {
+        await deleteContact(contact.id);
+        setSavedContacts((current) => current.filter((item) => item.id !== contact.id));
+        message.success(t("联系人已删除"));
+      } catch (err) {
+        message.error(apiMessage(err));
+      } finally {
+        setDeletingContactId(null);
+      }
+    },
+    [t],
+  );
+
+  const handleSaveNewContact = useCallback(
+    async (name: string, num: string) => {
+      try {
+        await saveContact(name, num);
         setSaveTarget(null);
         await refreshSavedContacts();
         message.success(t("已保存为联系人"));
@@ -157,6 +192,21 @@ export default function CallsPage() {
       }
     },
     [refreshSavedContacts, t],
+  );
+
+  const handleSaveEditedContact = useCallback(
+    async (name: string, num: string) => {
+      if (!editTarget) return;
+      try {
+        await updateContact(editTarget.id, name, num);
+        setEditTarget(null);
+        await refreshSavedContacts();
+        message.success(t("联系人已更新"));
+      } catch (err) {
+        message.error(apiMessage(err));
+      }
+    },
+    [editTarget, refreshSavedContacts, t],
   );
 
   return (
@@ -242,7 +292,7 @@ export default function CallsPage() {
                     {t("清空")}
                   </Button>
                 ) : (
-                  <Button size="small" loading={contactsLoading} onClick={() => void loadContacts()}>
+                  <Button size="small" loading={contactsLoading} onClick={() => void refreshSavedContacts()}>
                     {t("刷新")}
                   </Button>
                 )}
@@ -250,100 +300,24 @@ export default function CallsPage() {
             </div>
             <div className="mt-4">
               {tab === "history" ? (
-                history.length === 0 ? (
-                  <div className="py-6 text-center text-sm text-gray-400">{t("暂无通话记录")}</div>
-                ) : (
-                  <div className="space-y-1">
-                    {history.map((entry) => (
-                      <div
-                        key={entry.id}
-                        className="flex items-center justify-between gap-3 rounded-lg px-3 py-2 transition-colors hover:bg-black/5 dark:hover:bg-white/5"
-                      >
-                        <button
-                          type="button"
-                          onClick={() => setNumber(entry.number)}
-                          className="min-w-0 flex-1 text-left"
-                        >
-                          {contactNameByNumber.has(entry.number) ? (
-                            <>
-                              <span className="block truncate text-sm font-medium text-gray-900 dark:text-gray-100">
-                                {contactNameByNumber.get(entry.number)}
-                              </span>
-                              <span className="block truncate font-mono text-[10px] text-gray-400">{entry.number}</span>
-                            </>
-                          ) : (
-                            <span className="block truncate text-sm font-medium text-gray-900 dark:text-gray-100">
-                              {entry.number || t("未知号码")}
-                            </span>
-                          )}
-                          <span className="block text-xs text-gray-500 dark:text-gray-400">
-                            {entry.direction === "incoming" ? t("来电") : t("呼出")} ·{" "}
-                            {outcomeLabel(entry.outcome, entry.direction)} · {formatTime(entry.startedAt)}
-                            {entry.durationSeconds > 0 ? ` · ${formatDuration(entry.durationSeconds)}` : ""}
-                          </span>
-                        </button>
-                        <div className="flex shrink-0 items-center gap-3 text-xs">
-                          <button type="button" className="text-[#0ea5e9]" onClick={() => setNumber(entry.number)}>
-                            {t("拨打")}
-                          </button>
-                          <button
-                            type="button"
-                            className="text-gray-500 transition-colors hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200"
-                            onClick={() => setSaveTarget(entry)}
-                          >
-                            {t("保存")}
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )
-              ) : savedContacts.length === 0 && contacts.length === 0 ? (
-                <div className="py-6 text-center text-sm text-gray-400">
-                  {contactsLoading ? t("加载中...") : t("暂无联系人")}
-                </div>
+                <CallHistoryList
+                  entries={history}
+                  contactNameByNumber={contactNameByNumber}
+                  outcomeLabel={outcomeLabel}
+                  onDial={setNumber}
+                  onSave={setSaveTarget}
+                  onDelete={(entry) => void handleDeleteHistory(entry)}
+                  deletingId={deletingHistoryId}
+                />
               ) : (
-                <div className="space-y-1">
-                  {savedContacts.map((contact) => (
-                    <button
-                      key={contact.id}
-                      type="button"
-                      onClick={() => setNumber(contact.number)}
-                      className="flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-black/5 dark:hover:bg-white/5"
-                    >
-                      <span className="min-w-0">
-                        <span className="block truncate text-sm font-medium text-gray-900 dark:text-gray-100">
-                          {contact.name}
-                        </span>
-                        <span className="block truncate font-mono text-[10px] text-gray-400">{contact.number}</span>
-                      </span>
-                      <span className="flex shrink-0 items-center gap-2">
-                        <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-300">
-                          {t("本地")}
-                        </span>
-                        <span className="text-xs text-[#0ea5e9]">{t("拨打")}</span>
-                      </span>
-                    </button>
-                  ))}
-                  {contacts.map((contact) => (
-                    <button
-                      key={`${contact.deviceId}-${contact.peer}`}
-                      type="button"
-                      onClick={() => setNumber(contact.peer)}
-                      className="flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-black/5 dark:hover:bg-white/5"
-                    >
-                      <span className="min-w-0">
-                        <span className="block truncate text-sm font-medium text-gray-900 dark:text-gray-100">
-                          {contact.displayName || contact.peer}
-                        </span>
-                        {contact.displayName ? (
-                          <span className="block truncate font-mono text-[10px] text-gray-400">{contact.peer}</span>
-                        ) : null}
-                      </span>
-                      <span className="shrink-0 text-xs text-[#0ea5e9]">{t("拨打")}</span>
-                    </button>
-                  ))}
-                </div>
+                <CallContactsList
+                  contacts={savedContacts}
+                  loading={contactsLoading}
+                  onDial={setNumber}
+                  onEdit={setEditTarget}
+                  onDelete={(contact) => void handleDeleteContact(contact)}
+                  deletingId={deletingContactId}
+                />
               )}
             </div>
           </div>
@@ -353,7 +327,15 @@ export default function CallsPage() {
         open={saveTarget !== null}
         initialNumber={saveTarget?.number ?? ""}
         onClose={() => setSaveTarget(null)}
-        onSave={handleSaveContact}
+        onSave={handleSaveNewContact}
+      />
+      <SaveContactDialog
+        open={editTarget !== null}
+        initialName={editTarget?.name ?? ""}
+        initialNumber={editTarget?.number ?? ""}
+        title={t("编辑联系人")}
+        onClose={() => setEditTarget(null)}
+        onSave={handleSaveEditedContact}
       />
     </div>
   );

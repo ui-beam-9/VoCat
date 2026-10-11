@@ -94,7 +94,34 @@ func (media *rtpMedia) answerSDP(local net.IP) []byte {
 	})
 }
 
+// holdSDP 生成通话保持/恢复时重新协商（re-INVITE）使用的 SDP：
+// hold 为 true 时置为 a=sendonly（不再接收对端音频），false 时恢复 a=sendrecv。
+func (media *rtpMedia) holdSDP(local net.IP, hold bool) []byte {
+	media.mu.RLock()
+	codec, payload := media.codec, media.payloadType
+	media.mu.RUnlock()
+	direction := "sendrecv"
+	if hold {
+		direction = "sendonly"
+	}
+	if codec == "" {
+		return media.buildSDPDirection(local, "8 0 100", []string{
+			"a=rtpmap:8 PCMA/8000",
+			"a=rtpmap:0 PCMU/8000",
+			"a=rtpmap:100 telephone-event/8000",
+			"a=fmtp:100 0-15",
+		}, direction)
+	}
+	return media.buildSDPDirection(local, strconv.Itoa(int(payload)), []string{
+		fmt.Sprintf("a=rtpmap:%d %s/8000", payload, codec),
+	}, direction)
+}
+
 func (media *rtpMedia) buildSDP(local net.IP, formats string, attributes []string) []byte {
+	return media.buildSDPDirection(local, formats, attributes, "sendrecv")
+}
+
+func (media *rtpMedia) buildSDPDirection(local net.IP, formats string, attributes []string, direction string) []byte {
 	if local == nil || local.IsUnspecified() {
 		if udp, ok := media.conn.LocalAddr().(*net.UDPAddr); ok {
 			local = udp.IP
@@ -127,7 +154,10 @@ func (media *rtpMedia) buildSDP(local net.IP, formats string, attributes []strin
 	} else {
 		lines = append(lines, attributes...)
 	}
-	lines = append(lines, "a=ptime:20", "a=sendrecv", "")
+	if direction == "" {
+		direction = "sendrecv"
+	}
+	lines = append(lines, "a=ptime:20", "a="+direction, "")
 	return []byte(strings.Join(lines, "\r\n"))
 }
 

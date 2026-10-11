@@ -1,4 +1,4 @@
-import { ArrowSyncRegular, PowerRegular, ChatRegular } from "@fluentui/react-icons";
+import { ArrowSyncRegular, PowerRegular, ChatRegular, CallRegular } from "@fluentui/react-icons";
 import { Button, Spinner, Switch } from "../ui";
 import type { DeviceDetail } from "./types";
 import { useI18n } from "../../lib/i18n";
@@ -17,6 +17,7 @@ export interface DeviceDetailHeaderProps {
   onReconnectVowifi: () => void;
   onRebootModem: () => void;
   onOpenSms: () => void;
+  onOpenCall: () => void;
 	wifiCallingOnly?: boolean;
 	modemControlOnly?: boolean;
 }
@@ -78,6 +79,9 @@ export function DeviceDetailHeader(props: DeviceDetailHeaderProps) {
 		  </Button> : null}
           {!props.modemControlOnly ? <Button onClick={props.onOpenSms} className="ui-glass-border !border-0" icon={<ChatRegular />}>
             {t("短信")}
+          </Button> : null}
+          {!props.modemControlOnly ? <Button onClick={props.onOpenCall} className="ui-glass-border !border-0" icon={<CallRegular />}>
+            {t("通话")}
           </Button> : null}
         </div>
       </div>

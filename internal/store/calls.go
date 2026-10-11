@@ -167,6 +167,21 @@ func (s *Store) ListCallHistory(ctx context.Context, deviceID string, limit int)
 	return entries, nil
 }
 
+// DeleteCallHistoryEntry removes a single call log row by id.
+func (s *Store) DeleteCallHistoryEntry(ctx context.Context, id int64) error {
+	if id <= 0 {
+		return errors.New("call history id is required")
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM call_history WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete call history %d: %w", id, err)
+	}
+	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ClearCallHistory deletes the history. An empty deviceID clears every device.
 func (s *Store) ClearCallHistory(ctx context.Context, deviceID string) error {
 	deviceID = strings.TrimSpace(deviceID)
@@ -261,4 +276,66 @@ func (s *Store) ListContacts(ctx context.Context) ([]Contact, error) {
 		return nil, fmt.Errorf("iterate contacts: %w", err)
 	}
 	return values, nil
+}
+
+func (s *Store) contactByID(ctx context.Context, id int64) (Contact, error) {
+	var value Contact
+	var createdAt, updatedAt int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, name, number, created_at, updated_at
+		FROM contacts
+		WHERE id = ?
+	`, id).Scan(&value.ID, &value.Name, &value.Number, &createdAt, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Contact{}, ErrNotFound
+	}
+	if err != nil {
+		return Contact{}, fmt.Errorf("read contact %d: %w", id, err)
+	}
+	value.CreatedAt = time.Unix(createdAt, 0).UTC()
+	value.UpdatedAt = time.Unix(updatedAt, 0).UTC()
+	return value, nil
+}
+
+// UpdateContact edits an existing contact by id.
+func (s *Store) UpdateContact(ctx context.Context, id int64, name, number string) (Contact, error) {
+	name = strings.TrimSpace(name)
+	number = strings.TrimSpace(number)
+	if id <= 0 {
+		return Contact{}, errors.New("contact id is required")
+	}
+	if name == "" {
+		return Contact{}, errors.New("contact name is required")
+	}
+	if number == "" {
+		return Contact{}, errors.New("contact number is required")
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE contacts SET name = ?, number = ?, updated_at = ? WHERE id = ?
+	`, name, number, time.Now().UTC().Unix(), id)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return Contact{}, errors.New("another contact already uses this number")
+		}
+		return Contact{}, fmt.Errorf("update contact %d: %w", id, err)
+	}
+	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
+		return Contact{}, ErrNotFound
+	}
+	return s.contactByID(ctx, id)
+}
+
+// DeleteContact removes one contact by id.
+func (s *Store) DeleteContact(ctx context.Context, id int64) error {
+	if id <= 0 {
+		return errors.New("contact id is required")
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM contacts WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete contact %d: %w", id, err)
+	}
+	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

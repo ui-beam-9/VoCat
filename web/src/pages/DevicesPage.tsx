@@ -370,6 +370,10 @@ export default function DevicesPage() {
     const id = selectedIdRef.current;
     if (id) navigate(`/sms?device=${id}`);
   }, [navigate]);
+  const handleOpenCall = useCallback(() => {
+    const id = selectedIdRef.current;
+    if (id) navigate(`/calls?device=${id}`);
+  }, [navigate]);
   const handleSaveConfig = useCallback(async () => {
     const id = selectedIdRef.current.trim();
     if (!id || !editConfig) return;
@@ -759,6 +763,7 @@ export default function DevicesPage() {
                 onReconnectVowifi={handleReconnectVoWiFi}
                 onRebootModem={handleRebootModem}
                 onOpenSms={handleOpenSms}
+                onOpenCall={handleOpenCall}
 				wifiCallingOnly={isReader}
 				modemControlOnly={isNative410}
               />

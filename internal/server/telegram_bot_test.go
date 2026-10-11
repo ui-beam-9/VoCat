@@ -502,3 +502,17 @@ func (controller *telegramTestCallController) HangupCall(_ context.Context, _ st
 	controller.hungUp = append(controller.hungUp, id)
 	return nil
 }
+
+func (controller *telegramTestCallController) SendDTMF(_ context.Context, _ string, _ string, _ string) error {
+	return nil
+}
+
+func (controller *telegramTestCallController) SetCallHold(_ context.Context, _ string, id string, hold bool) (vowifi.Call, error) {
+	for _, call := range controller.calls {
+		if call.ID == id {
+			call.Held = hold
+			return call, nil
+		}
+	}
+	return vowifi.Call{}, errors.New("call not found")
+}

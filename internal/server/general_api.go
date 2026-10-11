@@ -42,6 +42,14 @@ func (s *Server) routeGeneralAPI(w http.ResponseWriter, r *http.Request) bool {
 	if s.routeSettingsAPI(w, r, cleanPath) {
 		return true
 	}
+	if cleanPath == "call-history" || strings.HasPrefix(cleanPath, "call-history/") {
+		s.handleCallHistory(w, r, strings.TrimPrefix(strings.TrimPrefix(cleanPath, "call-history"), "/"))
+		return true
+	}
+	if cleanPath == "contacts" || strings.HasPrefix(cleanPath, "contacts/") {
+		s.handleContacts(w, r, strings.TrimPrefix(strings.TrimPrefix(cleanPath, "contacts"), "/"))
+		return true
+	}
 	switch cleanPath {
 	case "logs/history":
 		s.handleLogHistory(w, r)
@@ -63,10 +71,8 @@ func (s *Server) routeGeneralAPI(w http.ResponseWriter, r *http.Request) bool {
 		s.handleHTTPSCertificate(w, r)
 	case "settings/developer":
 		s.handleDeveloperSettings(w, r)
-	case "call-history":
-		s.handleCallHistory(w, r)
-	case "contacts":
-		s.handleContacts(w, r)
+	case "phone-info":
+		s.handlePhoneInfo(w, r)
 	default:
 		return false
 	}

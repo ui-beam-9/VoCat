@@ -50,6 +50,7 @@ type Options struct {
 	UpdateRepository    string
 	UpdateToken         string
 	HTTPS               *httpsmode.Manager
+	DataDir             string
 }
 
 // Server is the single HTTP handler for the JSON API and embedded SPA.
@@ -98,6 +99,9 @@ type Server struct {
 	cellularDataEventOnce     sync.Once
 	cellularDataLifecycleOnce sync.Once
 	cellularData              *cellularDataRuntime
+	phoneInfoMu               sync.RWMutex
+	phoneInfoAPIKey           string
+	phoneInfoCache            map[string]phoneInfoCacheEntry
 }
 
 func New(options Options) (*Server, error) {
@@ -154,6 +158,8 @@ func New(options Options) (*Server, error) {
 		updateCheck:         update.CheckLatest,
 		updateApply:         update.ApplyLatest,
 		updateRestart:       update.RestartService,
+		phoneInfoAPIKey:     loadPhoneInfoConfig(options.DataDir).APIKey,
+		phoneInfoCache:      make(map[string]phoneInfoCacheEntry),
 	}
 	server.cellularDataRuntime()
 	server.loadAccessConfig(context.Background())
@@ -203,6 +209,8 @@ type VoWiFiCallController interface {
 	DialCall(context.Context, string, string) (vowifi.Call, error)
 	AnswerCall(context.Context, string, string) (vowifi.Call, error)
 	HangupCall(context.Context, string, string) error
+	SendDTMF(context.Context, string, string, string) error
+	SetCallHold(context.Context, string, string, bool) (vowifi.Call, error)
 }
 
 type VoWiFiCallMediaController interface {

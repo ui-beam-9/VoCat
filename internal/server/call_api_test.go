@@ -71,3 +71,9 @@ func (*fakeCallController) AnswerCall(context.Context, string, string) (vowifi.C
 }
 
 func (*fakeCallController) HangupCall(context.Context, string, string) error { return nil }
+
+func (*fakeCallController) SendDTMF(context.Context, string, string, string) error { return nil }
+
+func (*fakeCallController) SetCallHold(_ context.Context, _ string, id string, hold bool) (vowifi.Call, error) {
+	return vowifi.Call{ID: id, State: "active", Held: hold}, nil
+}

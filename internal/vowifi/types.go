@@ -446,6 +446,7 @@ type Call struct {
 	Reason     string     `json:"reason,omitempty"`
 	MediaReady bool       `json:"media_ready,omitempty"`
 	Codec      string     `json:"codec,omitempty"`
+	Held       bool       `json:"held,omitempty"`
 	EndedAt    *time.Time `json:"ended_at,omitempty"`
 }
 
@@ -456,6 +457,10 @@ type CallController interface {
 	DialCall(context.Context, string) (Call, error)
 	AnswerCall(context.Context, string) (Call, error)
 	HangupCall(context.Context, string) error
+	// SendDTMF delivers a single in-call keypad digit (0-9, *, #) to the remote.
+	SendDTMF(context.Context, string, string) error
+	// SetCallHold puts an active call on hold (true) or resumes it (false).
+	SetCallHold(context.Context, string, bool) (Call, error)
 }
 
 // CallMedia is a narrow, codec-independent bridge between an IMS RTP stream

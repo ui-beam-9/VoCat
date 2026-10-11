@@ -649,6 +649,19 @@ func (orchestrator *Orchestrator) HangupCall(ctx context.Context, id string) err
 	return err
 }
 
+func (orchestrator *Orchestrator) SendDTMF(ctx context.Context, id, digit string) error {
+	_, err := orchestrator.callAction(ctx, func(controller CallController) (Call, error) {
+		return Call{}, controller.SendDTMF(ctx, id, digit)
+	})
+	return err
+}
+
+func (orchestrator *Orchestrator) SetCallHold(ctx context.Context, id string, hold bool) (Call, error) {
+	return orchestrator.callAction(ctx, func(controller CallController) (Call, error) {
+		return controller.SetCallHold(ctx, id, hold)
+	})
+}
+
 func (orchestrator *Orchestrator) CallMedia(ctx context.Context, id string) (CallMedia, error) {
 	orchestrator.mu.Lock()
 	resources := orchestrator.resources
