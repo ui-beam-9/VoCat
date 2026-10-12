@@ -241,11 +241,11 @@ export function DeviceCallPanel({
 
   const activeCallId = activeCall?.id ?? "";
   const activeCallStarted = activeCall?.answeredAt || activeCall?.startedAt || "";
-  // 音频会话挂接的通话：优先已接通，其次带早期媒体的呼出，再次振铃中的呼入（来电也要能听到铃声）。
-  // early_media → active 是同一通话 id，接通后无需重连。
-  const mediaCall = useMemo(
-    () => activeCall ?? calls.find((call) => call.state === "early_media") ?? calls.find((call) => call.state === "ringing"),
-    [activeCall, calls],
+  // 音频会话挂接的通话 id：优先已接通，其次带早期媒体的呼出，再次振铃中的呼入。
+  // 用 id 而非对象引用避免轮询导致的重复创建。
+  const mediaCallId = useMemo(
+    () => activeCall?.id ?? calls.find((call) => call.state === "early_media")?.id ?? calls.find((call) => call.state === "ringing")?.id ?? "",
+    [activeCall?.id, calls],
   );
 
   // 通话中每秒刷新一次计时，用于显示通话时长。
@@ -310,15 +310,15 @@ export function DeviceCallPanel({
   useEffect(() => {
     if (!deviceId) return;
     const currentId = sessionCallIdRef.current;
-    if (mediaCall && voWiFiReady) {
-      if (mediaCall.id === currentId) return;
+    if (mediaCallId && voWiFiReady) {
+      if (mediaCallId === currentId) return;
       sessionRef.current?.stop();
       sessionRef.current = null;
       setMediaError("");
       setAudioState("connecting");
       const session = new CallAudioSession(
         deviceId,
-        mediaCall.id,
+        mediaCallId,
         {
           onState: (state, detail) => {
             setAudioState(state);
@@ -330,7 +330,7 @@ export function DeviceCallPanel({
         routeRef.current,
       );
       sessionRef.current = session;
-      sessionCallIdRef.current = mediaCall.id;
+      sessionCallIdRef.current = mediaCallId;
       session.setMicGain(micGainRef.current);
       session.start().catch((err) => {
         setMediaError(err instanceof Error ? err.message : String(err));
@@ -346,7 +346,7 @@ export function DeviceCallPanel({
       sessionCallIdRef.current = "";
       setAudioState("idle");
     }
-  }, [mediaCall, voWiFiReady, deviceId, t]);
+  }, [mediaCallId, voWiFiReady, deviceId, t]);
 
   useEffect(() => {
     return () => {
