@@ -34,6 +34,7 @@ import (
 	"vocat/internal/server"
 	"vocat/internal/store"
 	"vocat/internal/update"
+	"vocat/internal/voicegateway"
 	"vocat/internal/vowifi"
 	"vocat/internal/vowifi/ike"
 	"vocat/internal/vowifi/ims"
@@ -559,6 +560,19 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	if err != nil {
 		return fmt.Errorf("configure VoWiFi runtime: %w", err)
 	}
+	// CS 域语音网关（SIP/软电话桥接）：独立于 VoWiFi 链路，按已保存配置按需启动。
+	voiceGateway, err := voicegateway.New(voicegateway.Options{
+		Devices: deviceManager,
+		Store:   database,
+		Logger:  logger.With("category", "voicegateway"),
+	})
+	if err != nil {
+		return fmt.Errorf("create CS voice gateway: %w", err)
+	}
+	if err := voiceGateway.ApplyStored(deviceStartupContext); err != nil {
+		logger.Warn("apply stored CS voice gateway config", "error", err)
+	}
+	defer voiceGateway.Close()
 	// Start background consumers only after the synchronous radio/VoWiFi
 	// startup sequence. A snapshot refresh also takes the device operation
 	// mutex; starting it earlier can strand cold boot forever behind a serial
@@ -585,6 +599,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		Auth:                authService,
 		Devices:             deviceManager,
 		VoWiFi:              vowifiManager,
+		VoiceGateway:        voiceGateway,
 		Logs:                logs,
 		Assets:              web.Dist,
 		Logger:              logger,

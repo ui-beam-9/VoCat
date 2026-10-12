@@ -440,6 +440,72 @@ func (session *Session) enqueueURCLocked(line string) {
 	session.urcs = append(session.urcs, line)
 }
 
+// DrainURCs waits up to wait for an unsolicited line matching predicate and
+// returns it. Unlike WaitURC it never poisons the session when the wait window
+// elapses without data, so it is safe to call in a low-latency polling loop
+// (for example, waiting for RING/+CLIP/+QPCMV during a circuit-switched call).
+// Non-matching URCs are queued for later consumers, and the read buffer is
+// preserved across calls.
+func (session *Session) DrainURCs(
+	ctx context.Context,
+	wait time.Duration,
+	predicate func(string) bool,
+) (string, bool, error) {
+	if predicate == nil {
+		return "", false, errors.New("modem: URC predicate is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.closed {
+		return "", false, ErrSessionClosed
+	}
+	for index, line := range session.urcs {
+		if predicate(line) {
+			session.urcs = append(session.urcs[:index], session.urcs[index+1:]...)
+			return line, true, nil
+		}
+	}
+	if wait <= 0 {
+		return "", false, nil
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		if line, ok := popLine(&session.readBuf); ok {
+			line = strings.TrimSpace(strings.Trim(line, "\x00"))
+			if line == "" {
+				continue
+			}
+			if predicate(line) {
+				return line, true, nil
+			}
+			session.enqueueURCLocked(line)
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return "", false, err
+		}
+		if !time.Now().Before(deadline) {
+			return "", false, nil
+		}
+		buffer := make([]byte, 1024)
+		count, err := session.transport.Read(buffer)
+		if count > 0 {
+			session.readBuf = append(session.readBuf, buffer[:count]...)
+			continue
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) && session.closed {
+				return "", false, ErrSessionClosed
+			}
+			session.poisonLocked()
+			return "", false, fmt.Errorf("read serial response: %w", err)
+		}
+	}
+}
+
 func (session *Session) readLineLocked(ctx context.Context) (string, error) {
 	for {
 		if line, ok := popLine(&session.readBuf); ok {
@@ -573,6 +639,7 @@ func isURC(line string) bool {
 		"+CUSD:",
 		"+CLIP:",
 		"+CRING:",
+		"+QPCMV:",
 		"+QIND:",
 		"+QIURC:",
 		"+QSIMSTAT:",

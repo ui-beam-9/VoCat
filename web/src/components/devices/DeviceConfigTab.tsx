@@ -110,6 +110,9 @@ export function DeviceConfigTab({ editConfig, deviceStatus, saving, deleting, on
           <Field label={t("控制设备")}>
             <Input value={controlDevice || ""} disabled placeholder={t("由系统自动探测")} />
           </Field>
+          <Field label={t("音频设备 (ALSA)")}>
+            <Input value={editConfig.audioDevice || ""} onChange={(e) => onEditConfig({ ...editConfig, audioDevice: e.target.value })} placeholder="hw:1,0" />
+          </Field>
 		  {isReader ? <Field label="SIM PIN">
 			<Input type="password" value={editConfig.simPin || ""} onChange={(e) => onEditConfig({ ...editConfig, simPin: e.target.value })} maxLength={8} inputMode="numeric" placeholder={t("留空表示不修改；仅在 SIM 启用 PIN 时填写")} />
 		  </Field> : null}

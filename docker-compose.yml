@@ -15,6 +15,16 @@
 # makes the server return 409 on the apply endpoint). Update by pulling a new
 # image and recreating the container:
 #   docker compose pull && docker compose up -d
+#
+# CS voice gateway (softphone / Linphone bridge):
+#   - The SIP gateway listens on the configured address (default 0.0.0.0:5060).
+#     network_mode: host already exposes it, so no port mapping is needed.
+#   - RTP uses ephemeral UDP ports on the host stack; keep them reachable from
+#     the softphone (firewall/VPN) as required.
+#   - Bridging the modem's UAC audio needs its USB sound card inside the
+#     container. /dev is bind-mounted below (which includes /dev/snd), and the
+#     image ships alsa-utils (arecord/aplay). Set the device's audio_device
+#     (e.g. hw:1,0) in the VoCat UI.
 
 services:
   vocat:

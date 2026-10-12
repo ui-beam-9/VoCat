@@ -101,6 +101,9 @@ func (s *Server) routeSettingsAPI(
 	case "settings/vowifi":
 		s.handleVoWiFiSettings(w, r)
 		return true
+	case "settings/voice-gateway":
+		s.handleVoiceGatewaySettings(w, r)
+		return true
 	case "settings/sms":
 		s.handleSMSSettings(w, r)
 		return true

@@ -23,8 +23,10 @@ import (
 	"vocat/internal/extensions"
 	"vocat/internal/httpsmode"
 	"vocat/internal/loghub"
+	"vocat/internal/sipgw"
 	"vocat/internal/store"
 	"vocat/internal/update"
+	"vocat/internal/voicegateway"
 	"vocat/internal/vowifi"
 )
 
@@ -39,6 +41,7 @@ type Options struct {
 	Auth                *auth.Service
 	Devices             DeviceController
 	VoWiFi              VoWiFiController
+	VoiceGateway        VoiceGatewayController
 	Logs                *loghub.Hub
 	Assets              fs.FS
 	Logger              *slog.Logger
@@ -58,6 +61,7 @@ type Server struct {
 	auth                      *auth.Service
 	devices                   DeviceController
 	vowifi                    VoWiFiController
+	voiceGateway              VoiceGatewayController
 	ussdSessions              ussdSessionStore
 	logs                      *loghub.Hub
 	assets                    fs.FS
@@ -132,6 +136,7 @@ func New(options Options) (*Server, error) {
 		auth:                options.Auth,
 		devices:             options.Devices,
 		vowifi:              options.VoWiFi,
+		voiceGateway:        options.VoiceGateway,
 		ussdSessions:        newUSSDSessionStore(),
 		logs:                options.Logs,
 		assets:              options.Assets,
@@ -214,6 +219,13 @@ type VoWiFiCallController interface {
 
 type VoWiFiCallMediaController interface {
 	CallMedia(context.Context, string, string) (vowifi.CallMedia, error)
+}
+
+// VoiceGatewayController 是 CS 域语音网关（SIP/软电话桥接）的配置与状态边界。
+type VoiceGatewayController interface {
+	Redacted(context.Context) (sipgw.Config, error)
+	Save(context.Context, sipgw.Config) (sipgw.Config, error)
+	Status(context.Context) voicegateway.Status
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
