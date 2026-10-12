@@ -23,6 +23,7 @@ import { ErrorBoundary } from "../ui/ErrorBoundary";
 import { cx } from "../../lib/utils";
 import { BrandLogo } from "./BrandLogo";
 import { VersionBadge } from "./VersionBadge";
+import { IncomingCallWatcher } from "../IncomingCallWatcher";
 import { listPlugins, type InstalledPlugin } from "../../extensions";
 import { api } from "../../api";
 import type { SystemInfo } from "../../types";
@@ -246,6 +247,7 @@ export function AuthenticatedShell({
           </div>
         </main>
       </div>
+      <IncomingCallWatcher />
     </div>
   );
 }
