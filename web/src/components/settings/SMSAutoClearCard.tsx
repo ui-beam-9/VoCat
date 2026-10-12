@@ -16,7 +16,7 @@ export function SMSAutoClearCard({
 }) {
   const { t } = useI18n();
   return (
-    <div className="ui-card group relative overflow-hidden p-8">
+    <div className="ui-card group relative overflow-hidden p-8 lg:col-span-2">
       <CardDecor />
       <div className="relative z-10 mb-6 flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
