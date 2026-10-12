@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { tl, useI18n } from "../lib/i18n";
-import { startRingtone, stopRingtone, unlockRingtoneAudio } from "../lib/ringtone";
+import { startRingtone, stopRingtone, unlockRingtoneAudio, configureRingtone } from "../lib/ringtone";
 import { listCalls } from "./devices/callApi";
 import type { DeviceListItem, DevicesResponse } from "../types";
 
@@ -103,7 +103,17 @@ export function IncomingCallWatcher() {
         if (!currentKeys.has(key)) notifiedRef.current.delete(key);
       }
       // 有来电振铃则响铃，全部消失（接听/挂断/结束）则停止。
-      if (ringingCount > 0 && ringingCountRef.current === 0) startRingtone();
+      if (ringingCount > 0 && ringingCountRef.current === 0) {
+        // 来电开始振铃：读取铃声偏好后启动铃声（拉取失败沿用上次配置/默认）。
+        try {
+          const prefs = await api<{ ringtone?: string }>("/settings/preferences");
+          if (prefs.ringtone) configureRingtone(prefs.ringtone);
+        } catch {
+          /* 偏好拉取失败不影响振铃 */
+        }
+        if (!active) return;
+        startRingtone();
+      }
       if (ringingCount === 0 && ringingCountRef.current > 0) stopRingtone();
       ringingCountRef.current = ringingCount;
     };

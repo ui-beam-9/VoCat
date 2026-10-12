@@ -1,13 +1,17 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -65,6 +69,8 @@ func (s *Server) routeGeneralAPI(w http.ResponseWriter, r *http.Request) bool {
 		s.handlePasswordChange(w, r)
 	case "settings/preferences":
 		s.handleUIPreferences(w, r)
+	case "settings/ringtone/custom":
+		s.handleCustomRingtone(w, r)
 	case "settings/https":
 		s.handleHTTPSSettings(w, r)
 	case "settings/https/certificate":
@@ -83,6 +89,46 @@ func (s *Server) routeGeneralAPI(w http.ResponseWriter, r *http.Request) bool {
 
 const uiPreferencesSettingKey = "ui.preferences"
 
+const defaultRingtone = "classic"
+
+// 预设来电铃声标识；custom 表示用户上传的自定义铃声。
+var validRingtones = map[string]bool{
+	"classic": true,
+	"single":  true,
+	"chime":   true,
+	"beep":    true,
+	"custom":  true,
+}
+
+type uiPreferencesDocument struct {
+	Language string `json:"language,omitempty"`
+	Ringtone string `json:"ringtone,omitempty"`
+}
+
+// loadUIPreferences 读取持久化的偏好文档；缺省 language=en、ringtone=classic。
+func (s *Server) loadUIPreferences(ctx context.Context) uiPreferencesDocument {
+	document := uiPreferencesDocument{Language: "en", Ringtone: defaultRingtone}
+	setting, err := s.store.AppSetting(ctx, uiPreferencesSettingKey)
+	if err == nil {
+		_ = json.Unmarshal(setting.Value, &document)
+	}
+	if document.Language != "en" && document.Language != "zh" {
+		document.Language = "en"
+	}
+	if !validRingtones[document.Ringtone] {
+		document.Ringtone = defaultRingtone
+	}
+	return document
+}
+
+func (s *Server) saveUIPreferences(ctx context.Context, document uiPreferencesDocument) error {
+	raw, err := json.Marshal(document)
+	if err != nil {
+		return err
+	}
+	return s.store.UpsertAppSetting(ctx, store.AppSetting{Key: uiPreferencesSettingKey, Value: raw})
+}
+
 // loadUILanguage primes the process-level UI language (internal/i18n) from the
 // persisted preference so backend-generated strings are translated correctly
 // even before the first preferences request arrives after a restart.
@@ -100,34 +146,40 @@ func (s *Server) loadUILanguage(ctx context.Context) {
 }
 
 // handleUIPreferences reads and writes UI preferences such as the interface
-// language. Preferences live in the database so they stay consistent across
-// the browsers and devices of the single administrator.
+// language and incoming-call ringtone. Preferences live in the database so they
+// stay consistent across the browsers and devices of the single administrator.
+// PUT 采用合并写：仅更新请求中出现的字段，避免语言与铃声选择互冲。
 func (s *Server) handleUIPreferences(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		s.writeUIPreferences(w, r)
 	case http.MethodPut:
 		var request struct {
-			Language string `json:"language"`
+			Language *string `json:"language"`
+			Ringtone *string `json:"ringtone"`
 		}
 		if err := s.decodeJSON(w, r, &request); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
-		language := strings.ToLower(strings.TrimSpace(request.Language))
-		if language != "en" && language != "zh" {
-			writeError(w, http.StatusBadRequest, "invalid_language", "language must be \"en\" or \"zh\"")
-			return
+		document := s.loadUIPreferences(r.Context())
+		if request.Language != nil {
+			language := strings.ToLower(strings.TrimSpace(*request.Language))
+			if language != "en" && language != "zh" {
+				writeError(w, http.StatusBadRequest, "invalid_language", "language must be \"en\" or \"zh\"")
+				return
+			}
+			document.Language = language
 		}
-		raw, err := json.Marshal(map[string]string{"language": language})
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
-			return
+		if request.Ringtone != nil {
+			ringtone := strings.ToLower(strings.TrimSpace(*request.Ringtone))
+			if !validRingtones[ringtone] {
+				writeError(w, http.StatusBadRequest, "invalid_ringtone", "ringtone must be one of classic, single, chime, beep, custom")
+				return
+			}
+			document.Ringtone = ringtone
 		}
-		if err := s.store.UpsertAppSetting(r.Context(), store.AppSetting{
-			Key:   uiPreferencesSettingKey,
-			Value: raw,
-		}); err != nil {
+		if err := s.saveUIPreferences(r.Context(), document); err != nil {
 			s.writeStoreError(w, err)
 			return
 		}
@@ -139,28 +191,141 @@ func (s *Server) handleUIPreferences(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) writeUIPreferences(w http.ResponseWriter, r *http.Request) {
-	language := "en"
-	setting, err := s.store.AppSetting(r.Context(), uiPreferencesSettingKey)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-	case err != nil:
-		s.writeStoreError(w, err)
-		return
-	default:
-		var document struct {
-			Language string `json:"language"`
-		}
-		if json.Unmarshal(setting.Value, &document) == nil &&
-			(document.Language == "en" || document.Language == "zh") {
-			language = document.Language
-		}
-	}
+	document := s.loadUIPreferences(r.Context())
 	// Keep the process-level UI language in sync so backend-generated strings
 	// (status text, errors, hints) translate to match the SPA.
-	i18n.Set(language)
+	i18n.Set(document.Language)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"data": map[string]any{"language": language},
+		"data": map[string]any{"language": document.Language, "ringtone": document.Ringtone},
 	})
+}
+
+const customRingtoneSettingKey = "ui.ringtone.custom"
+
+// 自定义铃声上传上限（与插件上传同走 multipart，不受 JSON 1MB 全局限制）。
+const maxRingtoneUploadBytes = 8 << 20
+
+// 允许上传的音频 MIME 类型（multipart 文件头 Content-Type）。
+var validRingtoneMimeTypes = map[string]bool{
+	"audio/mpeg": true,
+	"audio/mp3":  true,
+	"audio/ogg":  true,
+	"audio/wav":  true,
+	"audio/x-wav": true,
+	"audio/mp4":  true,
+	"audio/aac":  true,
+	"audio/x-m4a": true,
+	"audio/webm": true,
+}
+
+type customRingtoneMeta struct {
+	Name     string `json:"name"`
+	MimeType string `json:"mimeType"`
+}
+
+func (s *Server) loadCustomRingtoneMeta(ctx context.Context) (customRingtoneMeta, bool) {
+	setting, err := s.store.AppSetting(ctx, customRingtoneSettingKey)
+	if err != nil {
+		return customRingtoneMeta{}, false
+	}
+	var meta customRingtoneMeta
+	if json.Unmarshal(setting.Value, &meta) != nil || meta.MimeType == "" {
+		return customRingtoneMeta{}, false
+	}
+	return meta, true
+}
+
+// handleCustomRingtone 管理用户上传的自定义来电铃声：文件本体存数据目录下
+// 固定路径（s.ringtoneFile，docker 中即 /opt/vocat/data/ringtone），
+// 原始文件名与 MIME 类型作为元数据存 AppSetting。
+func (s *Server) handleCustomRingtone(w http.ResponseWriter, r *http.Request) {
+	if s.ringtoneFile == "" {
+		writeError(w, http.StatusServiceUnavailable, "ringtone_unavailable", "custom ringtone storage is not configured")
+		return
+	}
+	switch r.Method {
+	case http.MethodHead:
+		// 探测是否已上传（前端设置页用），不读文件本体；文件名经 URL 编码放响应头。
+		meta, ok := s.loadCustomRingtoneMeta(r.Context())
+		if !ok {
+			writeError(w, http.StatusNotFound, "not_found", "no custom ringtone uploaded")
+			return
+		}
+		w.Header().Set("X-Ringtone-Name", url.QueryEscape(meta.Name))
+		w.WriteHeader(http.StatusOK)
+	case http.MethodGet:
+		meta, ok := s.loadCustomRingtoneMeta(r.Context())
+		if !ok {
+			writeError(w, http.StatusNotFound, "not_found", "no custom ringtone uploaded")
+			return
+		}
+		data, err := os.ReadFile(s.ringtoneFile)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "not_found", "no custom ringtone uploaded")
+			return
+		}
+		w.Header().Set("Content-Type", meta.MimeType)
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeContent(w, r, meta.Name, time.Time{}, bytes.NewReader(data))
+	case http.MethodPut:
+		r.Body = http.MaxBytesReader(nil, r.Body, maxRingtoneUploadBytes+(1<<20))
+		if err := r.ParseMultipartForm(maxRingtoneUploadBytes); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_ringtone_upload", "ringtone upload must be multipart/form-data and no larger than 8 MiB")
+			return
+		}
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_ringtone_upload", "multipart field file is required")
+			return
+		}
+		defer file.Close()
+		mimeType := strings.ToLower(strings.TrimSpace(header.Header.Get("Content-Type")))
+		if !validRingtoneMimeTypes[mimeType] {
+			writeError(w, http.StatusBadRequest, "invalid_ringtone_type", "ringtone must be an audio file (mp3, ogg, wav, m4a, aac, webm)")
+			return
+		}
+		data, err := io.ReadAll(io.LimitReader(file, maxRingtoneUploadBytes+1))
+		if err != nil || len(data) == 0 || len(data) > maxRingtoneUploadBytes {
+			writeError(w, http.StatusBadRequest, "invalid_ringtone_upload", "ringtone file is empty or larger than 8 MiB")
+			return
+		}
+		if err := os.WriteFile(s.ringtoneFile, data, 0o600); err != nil {
+			s.logger.Error("write custom ringtone file", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
+			return
+		}
+		name := strings.TrimSpace(filepath.Base(header.Filename))
+		if name == "" || name == "." {
+			name = "ringtone"
+		}
+		raw, _ := json.Marshal(customRingtoneMeta{Name: name, MimeType: mimeType})
+		if err := s.store.UpsertAppSetting(r.Context(), store.AppSetting{Key: customRingtoneSettingKey, Value: raw}); err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": customRingtoneMeta{Name: name, MimeType: mimeType}})
+	case http.MethodDelete:
+		if err := os.Remove(s.ringtoneFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.logger.Warn("remove custom ringtone file", "error", err)
+		}
+		if err := s.store.DeleteAppSetting(r.Context(), customRingtoneSettingKey); err != nil && !errors.Is(err, store.ErrNotFound) {
+			s.writeStoreError(w, err)
+			return
+		}
+		// 当前选择为自定义铃声时回退到默认预设。
+		document := s.loadUIPreferences(r.Context())
+		if document.Ringtone == "custom" {
+			document.Ringtone = defaultRingtone
+			if err := s.saveUIPreferences(r.Context(), document); err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"deleted": true}})
+	default:
+		w.Header().Set("Allow", "GET, HEAD, PUT, DELETE")
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+	}
 }
 
 func (s *Server) handleLogHistory(w http.ResponseWriter, r *http.Request) {

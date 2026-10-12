@@ -611,6 +611,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		UpdateRepository:    strings.TrimSpace(os.Getenv("VOCAT_REPO")),
 		UpdateToken:         strings.TrimSpace(os.Getenv("GITHUB_TOKEN")),
 		HTTPS:               httpsManager,
+		RingtoneFile:        filepath.Join(filepath.Dir(cfg.DatabasePath), "ringtone"),
 	})
 	if err != nil {
 		return err
