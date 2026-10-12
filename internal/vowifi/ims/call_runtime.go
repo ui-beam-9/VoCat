@@ -1096,7 +1096,9 @@ func (session *Session) CallMedia(_ context.Context, id string) (vowifi.CallMedi
 	if call == nil {
 		return nil, ErrCallNotFound
 	}
-	if call.public.State != "active" || call.media == nil || !call.media.ready() {
+	// early_media 阶段媒体已协商（对端正发回铃音/录音通知），同样放行音频桥，
+	// 否则网页在对方接听前听不到振铃音。
+	if state := call.public.State; (state != "active" && state != "early_media") || call.media == nil || !call.media.ready() {
 		return nil, ErrCallState
 	}
 	return call.media, nil

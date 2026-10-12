@@ -241,6 +241,12 @@ export function DeviceCallPanel({
 
   const activeCallId = activeCall?.id ?? "";
   const activeCallStarted = activeCall?.answeredAt || activeCall?.startedAt || "";
+  // 音频会话挂接的通话：优先已接通，其次带早期媒体的呼出（回铃音阶段就能听到声音）。
+  // early_media → active 是同一通话 id，接通后无需重连。
+  const mediaCall = useMemo(
+    () => activeCall ?? calls.find((call) => call.state === "early_media"),
+    [activeCall, calls],
+  );
 
   // 通话中每秒刷新一次计时，用于显示通话时长。
   useEffect(() => {
@@ -294,19 +300,19 @@ export function DeviceCallPanel({
     };
   }, [activeCall?.number]);
 
-  // 通话接通后建立音频桥，通话结束或切换通话时释放。
+  // 通话接通或进入早期媒体（回铃音）后建立音频桥，通话结束或切换通话时释放。
   useEffect(() => {
     if (!deviceId) return;
     const currentId = sessionCallIdRef.current;
-    if (activeCall && voWiFiReady) {
-      if (activeCall.id === currentId) return;
+    if (mediaCall && voWiFiReady) {
+      if (mediaCall.id === currentId) return;
       sessionRef.current?.stop();
       sessionRef.current = null;
       setMediaError("");
       setAudioState("connecting");
       const session = new CallAudioSession(
         deviceId,
-        activeCall.id,
+        mediaCall.id,
         {
           onState: (state, detail) => {
             setAudioState(state);
@@ -318,7 +324,7 @@ export function DeviceCallPanel({
         routeRef.current,
       );
       sessionRef.current = session;
-      sessionCallIdRef.current = activeCall.id;
+      sessionCallIdRef.current = mediaCall.id;
       session.setMicGain(micGainRef.current);
       session.start().catch((err) => {
         setMediaError(err instanceof Error ? err.message : String(err));
@@ -334,7 +340,7 @@ export function DeviceCallPanel({
       sessionCallIdRef.current = "";
       setAudioState("idle");
     }
-  }, [activeCall, voWiFiReady, deviceId, t]);
+  }, [mediaCall, voWiFiReady, deviceId, t]);
 
   useEffect(() => {
     return () => {
