@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -34,10 +35,13 @@ type rtpMedia struct {
 	sequence  uint16
 	timestamp uint32
 	ssrc      uint32
+	dropCount uint64 // payload 不匹配累计丢弃数（仅用于诊断日志降频）
 
 	downlink chan []int16
 	closed   chan struct{}
 	close    sync.Once
+
+	logger *slog.Logger // 可选：诊断 RTP 收发（payload 不匹配、远端学习等）
 }
 
 func newRTPMedia(local net.IP) (*rtpMedia, error) {
@@ -58,6 +62,13 @@ func newRTPMedia(local net.IP) (*rtpMedia, error) {
 	}
 	go media.receive()
 	return media, nil
+}
+
+// setLogger 注入诊断 logger（在 configureRemote 成功后由 Session 调用）。
+func (media *rtpMedia) setLogger(logger *slog.Logger) {
+	media.mu.Lock()
+	media.logger = logger
+	media.mu.Unlock()
 }
 
 func (media *rtpMedia) Codec() string {
@@ -201,7 +212,17 @@ func (media *rtpMedia) configureRemote(body []byte) error {
 	media.codec = codec
 	media.payloadType = payload
 	media.remoteDirection = sdpDirection(body)
+	logger := media.logger
 	media.mu.Unlock()
+	if logger != nil {
+		logger.Info("IMS RTP remote configured",
+			"category", "call",
+			"remote", fmt.Sprintf("%s:%d", address, port),
+			"codec", codec,
+			"payload_type", payload,
+			"local_port", media.conn.LocalAddr().(*net.UDPAddr).Port,
+		)
+	}
 	return nil
 }
 
@@ -359,6 +380,20 @@ func (media *rtpMedia) receive() {
 		}
 		media.mu.Unlock()
 		if remote == nil || !remote.IP.Equal(source.IP) || count < 12 || packet[0]>>6 != 2 || packet[1]&0x7f != payload {
+			// 诊断：仅当已协商远端地址时才记录，每 100 个丢包打一次，避免日志洪泛。
+			if remote != nil && media.logger != nil && packet[1]&0x7f != payload {
+				media.dropCount++
+				if media.dropCount%100 == 1 {
+					media.logger.Warn("IMS RTP packet dropped (payload type mismatch)",
+						"category", "call",
+						"source", fmt.Sprintf("%s:%d", source.IP, source.Port),
+						"payload_type", packet[1]&0x7f,
+						"want_payload_type", payload,
+						"codec", codec,
+						"dropped", media.dropCount,
+					)
+				}
+			}
 			continue
 		}
 		header := 12 + int(packet[0]&0x0f)*4

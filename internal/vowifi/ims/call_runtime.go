@@ -221,9 +221,20 @@ func (session *Session) watchOutgoingCall(call *imsCall, key sipTransactionKey) 
 				session.updateCallDialogFromResponse(call, response)
 				if len(response.Body) > 0 {
 					if mediaErr := call.media.configureRemote(response.Body); mediaErr == nil {
+						call.media.setLogger(session.imsLogger())
 						session.setCallMediaReady(call.callID)
 						session.setCallState(call.callID, "early_media")
 						session.startCallWatchdog(call)
+					} else if logger := session.imsLogger(); logger != nil {
+						// 早期媒体协商失败不能静默吞掉：必须记录，否则无法区分"无 SDP"与"SDP 无可用音频"。
+						logger.Warn("IMS call early media negotiation failed",
+							"category", "call",
+							"device_id", session.request.DeviceID,
+							"call_id", call.callID,
+							"sip_status", response.StatusCode,
+							"error", mediaErr.Error(),
+							"sdp_bytes", len(response.Body),
+						)
 					}
 				} else if response.StatusCode >= 180 {
 					// 183(带 SDP) 与 180 可能乱序到达：一旦进入 early_media 就不再回退为 ringing，
