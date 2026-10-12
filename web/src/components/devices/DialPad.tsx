@@ -29,6 +29,10 @@ export interface DialPadProps {
   // "dial"：普通拨号；"dtmf"：通话中发送按键音。
   mode?: "dial" | "dtmf";
   callVariant?: "primary" | "danger";
+  // 来电振铃时提供：主按钮区显示「接听」+「挂断」两个按钮。
+  onAnswer?: () => void;
+  answerLabel?: string;
+  answerDisabled?: boolean;
 }
 
 export function DialPad({
@@ -42,6 +46,9 @@ export function DialPad({
   className,
   mode = "dial",
   callVariant = "primary",
+  onAnswer,
+  answerLabel = "接听",
+  answerDisabled = false,
 }: DialPadProps) {
   const dtmf = mode === "dtmf";
   return (
@@ -83,19 +90,40 @@ export function DialPad({
           </button>
         </div>
       ) : null}
-      <button
-        type="button"
-        disabled={callDisabled}
-        onClick={onCall}
-        className={cx(
-          "mt-2 inline-flex h-11 w-full items-center justify-center rounded-xl border border-transparent text-sm font-medium text-white transition-colors disabled:cursor-not-allowed disabled:opacity-60",
-          callVariant === "danger"
-            ? "bg-[#f56c6c] hover:bg-[#f78989] active:bg-[#dd6161]"
-            : "bg-[#67c23a] hover:bg-[#85ce61] active:bg-[#5daf34]",
-        )}
-      >
-        {callLabel}
-      </button>
+      {onAnswer ? (
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            disabled={answerDisabled}
+            onClick={onAnswer}
+            className="inline-flex h-11 items-center justify-center rounded-xl border border-transparent bg-[#67c23a] text-sm font-medium text-white transition-colors hover:bg-[#85ce61] active:bg-[#5daf34] disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {answerLabel}
+          </button>
+          <button
+            type="button"
+            disabled={callDisabled}
+            onClick={onCall}
+            className="inline-flex h-11 items-center justify-center rounded-xl border border-transparent bg-[#f56c6c] text-sm font-medium text-white transition-colors hover:bg-[#f78989] active:bg-[#dd6161] disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {callLabel}
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          disabled={callDisabled}
+          onClick={onCall}
+          className={cx(
+            "mt-2 inline-flex h-11 w-full items-center justify-center rounded-xl border border-transparent text-sm font-medium text-white transition-colors disabled:cursor-not-allowed disabled:opacity-60",
+            callVariant === "danger"
+              ? "bg-[#f56c6c] hover:bg-[#f78989] active:bg-[#dd6161]"
+              : "bg-[#67c23a] hover:bg-[#85ce61] active:bg-[#5daf34]",
+          )}
+        >
+          {callLabel}
+        </button>
+      )}
     </div>
   );
 }

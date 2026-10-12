@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"vocat/internal/vowifi"
@@ -19,6 +20,19 @@ var (
 )
 
 const terminalCallRetention = 30 * time.Second
+
+// 通话兜底超时（运营商不回传终态信令时，由本端主动结束，避免网页一直显示通话中）：
+//   - outgoingSetupTimeout：呼出后从 INVITE 发出起算，超时仍未收到 200 OK 则 CANCEL，
+//     覆盖对方拒接/失败但最终响应（486/603/480）被网络丢弃，呼叫卡在拨号/振铃/early media；
+//   - earlyMediaNoRTPTimeout：183 已协商媒体但对端从未发送 RTP；
+//   - earlyMediaSilenceTimeout：early media 曾收到 RTP（忙音/提示音）后音频停止；
+//   - mediaSilenceTimeout：接通后对端音频停止（BYE 丢失）。
+const (
+	mediaSilenceTimeout      = 30 * time.Second
+	earlyMediaSilenceTimeout = 15 * time.Second
+	earlyMediaNoRTPTimeout   = 20 * time.Second
+	outgoingSetupTimeout     = 60 * time.Second
+)
 
 const (
 	mmtelServiceURN = "urn:urn-7:3gpp-service.ims.icsi.mmtel"
@@ -44,6 +58,8 @@ type imsCall struct {
 	pracked        map[string]bool
 	sessionExpires int
 	sessionCancel  context.CancelFunc
+	watchdogOnce   sync.Once
+	stateSince     time.Time
 }
 
 func (session *Session) Calls() []vowifi.Call {
@@ -141,7 +157,7 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 	call := &imsCall{
 		public: vowifi.Call{ID: callID, Number: number, Direction: "outgoing", State: "dialing", StartedAt: time.Now().UTC()},
 		callID: callID, target: target, inviteTarget: target, from: from, to: to, branch: branch, cseq: cseq, responses: responses,
-		routes: routes, media: media, pracked: make(map[string]bool),
+		routes: routes, media: media, pracked: make(map[string]bool), stateSince: time.Now().UTC(),
 	}
 	session.callMu.Lock()
 	session.calls[callID] = call
@@ -169,6 +185,9 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 		return vowifi.Call{}, fmt.Errorf("ims: send SIP INVITE: %w", err)
 	}
 	go session.watchOutgoingCall(call, key)
+	// 呼出即启动兜底监控：即使对端只回 180 Ringing（无 SDP）、或拒接最终响应被丢弃，
+	// 也能靠建立总超时主动 CANCEL，而不是死等 SIP 事务超时。
+	session.startCallWatchdog(call)
 	return call.public, nil
 }
 
@@ -204,6 +223,7 @@ func (session *Session) watchOutgoingCall(call *imsCall, key sipTransactionKey) 
 					if mediaErr := call.media.configureRemote(response.Body); mediaErr == nil {
 						session.setCallMediaReady(call.callID)
 						session.setCallState(call.callID, "early_media")
+						session.startCallWatchdog(call)
 					}
 				} else if response.StatusCode >= 180 {
 					session.setCallState(call.callID, "ringing")
@@ -233,6 +253,7 @@ func (session *Session) watchOutgoingCall(call *imsCall, key sipTransactionKey) 
 				session.setCallMediaReady(call.callID)
 				session.setCallState(call.callID, "active")
 				session.startSessionTimer(call, response.value("Session-Expires"))
+				session.startCallWatchdog(call)
 			} else {
 				if ackErr := session.sendRejectedInviteACK(call, response); ackErr != nil && session.provider != nil && session.provider.config.Logger != nil {
 					session.provider.config.Logger.Warn("IMS rejected INVITE ACK failed",
@@ -288,6 +309,7 @@ func (session *Session) AnswerCall(_ context.Context, id string) (vowifi.Call, e
 	if call.media.ready() {
 		session.setCallMediaReady(id)
 	}
+	session.startCallWatchdog(call)
 	session.callMu.Lock()
 	result := call.public
 	session.callMu.Unlock()
@@ -468,7 +490,7 @@ func (session *Session) handleCallRequest(request *sipRequest, respond func([]by
 			public: vowifi.Call{ID: callID, Number: number, Direction: "incoming", State: "ringing", StartedAt: time.Now().UTC()},
 			callID: callID, target: target, inviteTarget: request.URI, from: request.value("To") + ";tag=" + session.fromTag,
 			to: request.value("From"), invite: request, respond: respond, routes: request.values("Record-Route"), media: media,
-			pracked: make(map[string]bool),
+			pracked: make(map[string]bool), stateSince: time.Now().UTC(),
 		}
 		session.callMu.Lock()
 		session.calls[callID] = call
@@ -539,6 +561,16 @@ func (session *Session) handleCallRequest(request *sipRequest, respond func([]by
 		call := session.calls[callID]
 		session.callMu.Unlock()
 		if call == nil {
+			// 对端挂断（BYE/CANCEL）但本地没有对应通话：记录以便排查"网页仍显示通话中"。
+			if session.provider != nil && session.provider.config.Logger != nil {
+				session.provider.config.Logger.Warn("IMS inbound call teardown did not match a call",
+					"category", "call",
+					"event", "call.remote_teardown_unmatched",
+					"device_id", session.request.DeviceID,
+					"method", request.Method,
+					"call_id", callID,
+				)
+			}
 			return false
 		}
 		response, err := buildSIPResponseWithBody(request, 200, session.fromTag, nil)
@@ -553,6 +585,15 @@ func (session *Session) handleCallRequest(request *sipRequest, respond func([]by
 			}
 		}
 		session.finishCall(callID, "ended", 0, "")
+		if session.provider != nil && session.provider.config.Logger != nil {
+			session.provider.config.Logger.Info("IMS call ended by remote",
+				"category", "call",
+				"event", "call.remote_teardown",
+				"device_id", session.request.DeviceID,
+				"method", request.Method,
+				"call_id", callID,
+			)
+		}
 		return true
 	default:
 		return false
@@ -1002,6 +1043,9 @@ func (session *Session) logCallResponse(response *sipResponse, diagnostic string
 func (session *Session) setCallState(id, state string) {
 	session.callMu.Lock()
 	if call := session.calls[id]; call != nil {
+		if call.public.State != state {
+			call.stateSince = time.Now().UTC()
+		}
 		call.public.State = state
 		if state == "active" && call.public.AnsweredAt == nil {
 			now := time.Now().UTC()
@@ -1043,6 +1087,110 @@ func (session *Session) CallMedia(_ context.Context, id string) (vowifi.CallMedi
 		return nil, ErrCallState
 	}
 	return call.media, nil
+}
+
+// startCallWatchdog 启动一次通话的兜底监控（每通电话只启动一次）。
+func (session *Session) startCallWatchdog(call *imsCall) {
+	if call == nil || session == nil || session.refreshContext == nil {
+		return
+	}
+	call.watchdogOnce.Do(func() {
+		go session.watchCallMedia(call)
+	})
+}
+
+// watchCallMedia 监控通话存活，覆盖运营商不回传终态信令（拒接最终响应/BYE 丢失）的场景：
+//   - 呼出未接通（dialing/ringing/early_media）超过 outgoingSetupTimeout 仍未收到 200 OK：主动 CANCEL；
+//   - early_media 已协商媒体但对端从未发送 RTP，超过 earlyMediaNoRTPTimeout：主动 CANCEL；
+//   - early_media/active 曾收到 RTP 后音频停止：分别按 15s/30s 主动 CANCEL/BYE。
+//
+// 本地保持（Held）或对端 SDP 不发送音频（recvonly/inactive）时跳过媒体类判定，避免误挂断。
+// 来电振铃（incoming/ringing）不启动本监控，不受呼出建立超时影响。
+func (session *Session) watchCallMedia(call *imsCall) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-session.refreshContext.Done():
+			return
+		case <-ticker.C:
+		}
+		session.callMu.Lock()
+		current := session.calls[call.callID]
+		if current == nil || current.public.EndedAt != nil || current.public.Held {
+			session.callMu.Unlock()
+			return
+		}
+		state := current.public.State
+		direction := current.public.Direction
+		media := current.media
+		stateSince := current.stateSince
+		startedAt := current.public.StartedAt
+		session.callMu.Unlock()
+		if state != "dialing" && state != "ringing" && state != "early_media" && state != "active" {
+			return
+		}
+
+		// 逐类判定是否需要主动结束；event 非空表示触发。
+		event, reason := "", ""
+		method := "BYE"
+		if direction == "outgoing" && state != "active" && time.Since(startedAt) > outgoingSetupTimeout {
+			// 呼叫建立总超时：对方拒接/失败的最终响应被网络丢弃时的最终兜底（与真实手机行为一致）。
+			event = "call.setup_timeout"
+			reason = "outgoing call setup timed out without final response"
+			method = "CANCEL"
+		} else if state == "early_media" || state == "active" {
+			if media != nil && media.ready() && media.RemoteSendsAudio() {
+				last := media.LastInbound()
+				switch {
+				case state == "early_media" && last.IsZero() && time.Since(stateSince) > earlyMediaNoRTPTimeout:
+					// 183 已协商媒体但对端一直不发 RTP，媒体通道实际未建立。
+					event = "call.early_media_no_rtp"
+					reason = "early media negotiated but no inbound RTP"
+					method = "CANCEL"
+				case !last.IsZero() && time.Since(last) > mediaTimeoutForState(state):
+					// 曾收到对端音频（忙音/提示音/通话语音）后音频停止。
+					event = "call.media_silence"
+					reason = "remote audio stopped"
+					if state == "early_media" {
+						method = "CANCEL"
+					}
+				}
+			}
+		}
+		if event == "" {
+			continue
+		}
+
+		if session.provider != nil && session.provider.config.Logger != nil {
+			session.provider.config.Logger.Info("IMS call ended by watchdog",
+				"category", "call",
+				"event", event,
+				"device_id", session.request.DeviceID,
+				"call_id", call.callID,
+				"state", state,
+			)
+		}
+		// 标记为本地主动结束：CANCEL 后迟到的 487 Request Terminated 会被识别为本地挂断，
+		// 而不是覆盖成网络拒接（failed）。
+		session.callMu.Lock()
+		if existing := session.calls[call.callID]; existing != nil {
+			existing.terminated = true
+		}
+		session.callMu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = session.sendDialogRequest(ctx, current, method)
+		cancel()
+		session.finishCall(call.callID, "ended", 0, reason)
+		return
+	}
+}
+
+func mediaTimeoutForState(state string) time.Duration {
+	if state == "early_media" {
+		return earlyMediaSilenceTimeout
+	}
+	return mediaSilenceTimeout
 }
 
 func (session *Session) finishCall(id, state string, code int, reason string) {

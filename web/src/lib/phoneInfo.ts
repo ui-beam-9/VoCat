@@ -20,6 +20,8 @@ function key(number: string): string {
 }
 
 export async function fetchPhoneInfo(phone: string): Promise<PhoneInfo> {
+  const cached = cache.get(key(phone));
+  if (cached) return cached;
   const result = await api<PhoneInfo>(`/phone-info?phone=${encodeURIComponent(phone.trim())}`);
   cache.set(key(phone), result);
   return result;

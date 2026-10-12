@@ -283,6 +283,22 @@ func (session *Session) dispatchPacket(packet sipPacket, respond func([]byte) er
 			session.logOutboundSMS(slog.LevelWarn, "IMS SIP MESSAGE response was unmatched",
 				"stage", "sip_response", "call_id", key.callID,
 				"cseq", key.cseq, "sip_status", response.StatusCode)
+		} else {
+			// 未能匹配到事务的响应（例如对端拒接的最终响应落在事务已被清理之后），
+			// 记录以便排查"呼出被拒接后网页仍显示通话中"。
+			logger := slog.Default()
+			if session.provider != nil && session.provider.config.Logger != nil {
+				logger = session.provider.config.Logger
+			}
+			logger.Warn("IMS SIP response was unmatched",
+				"category", "call",
+				"event", "sip.response_unmatched",
+				"device_id", session.request.DeviceID,
+				"method", method,
+				"call_id", key.callID,
+				"cseq", key.cseq,
+				"sip_status", response.StatusCode,
+			)
 		}
 		return
 	}
@@ -531,7 +547,7 @@ func (session *Session) processSMSMessage(request *sipRequest) {
 		if session.provider.config.OnSIMDataDownload == nil {
 			session.logInboundSMS(slog.LevelWarn, "IMS SIM data download has no UICC handler", request,
 				"stage", "uicc", "rp_reference", int(rpdu.reference))
-      session.sendLoggedDeliveryReport(request, []byte{0x02, rpdu.reference}, "rp_ack")
+			session.sendLoggedDeliveryReport(request, []byte{0x02, rpdu.reference}, "rp_ack")
 			return
 		}
 		if err := session.provider.config.OnSIMDataDownload(context.Background(), SIMDataDownload{

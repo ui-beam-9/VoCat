@@ -226,6 +226,11 @@ export function DeviceCallPanel({
     [calls],
   );
   const liveCalls = useMemo(() => calls.filter((call) => isLiveCall(call.state)), [calls]);
+  // 来电振铃：主按钮区显示「接听」+「挂断」。
+  const incomingRinging = useMemo(
+    () => calls.find((call) => call.state === "ringing" && call.direction === "incoming"),
+    [calls],
+  );
   // 主按钮可挂断的通话：优先已接通，其次是呼出中的通话。
   const controllableCall = useMemo(
     () =>
@@ -252,7 +257,7 @@ export function DeviceCallPanel({
     return Math.max(0, Math.floor((nowTick - started) / 1000));
   }, [activeCallStarted, nowTick]);
 
-  // 通话接通后查询号码归属地（结果在 lib/phoneInfo 内缓存）。
+  // 通话接通后查询号码归属地（结果在 lib/phoneInfo 内缓存）；失败时通话期间自动重试，避免偶发失败一直显示「归属地未知」。
   useEffect(() => {
     const target = (activeCall?.number ?? "").trim();
     if (!target) {
@@ -261,19 +266,31 @@ export function DeviceCallPanel({
       return;
     }
     let cancelled = false;
-    setPhoneInfoLoading(true);
-    fetchPhoneInfo(target)
-      .then((info) => {
-        if (!cancelled) setPhoneInfoText(info.display || "");
-      })
-      .catch(() => {
-        if (!cancelled) setPhoneInfoText("");
-      })
-      .finally(() => {
-        if (!cancelled) setPhoneInfoLoading(false);
-      });
+    let attempts = 0;
+    let retryTimer: number | undefined;
+    const load = () => {
+      setPhoneInfoLoading(true);
+      fetchPhoneInfo(target)
+        .then((info) => {
+          if (cancelled) return;
+          setPhoneInfoText(info.display || "");
+          setPhoneInfoLoading(false);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          attempts += 1;
+          if (attempts < 3) {
+            retryTimer = window.setTimeout(load, 3000);
+            return;
+          }
+          setPhoneInfoText("");
+          setPhoneInfoLoading(false);
+        });
+    };
+    load();
     return () => {
       cancelled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
     };
   }, [activeCall?.number]);
 
@@ -574,13 +591,16 @@ export function DeviceCallPanel({
         className="mt-3"
         mode={activeCall ? "dtmf" : "dial"}
         disabled={!voWiFiReady || busy}
-        callDisabled={!voWiFiReady || busy || !loaded}
-        callVariant={controllableCall ? "danger" : "primary"}
-        callLabel={controllableCall ? t("挂断") : t("拨号")}
+        callDisabled={!voWiFiReady || busy || (!incomingRinging && !controllableCall && !loaded)}
+        callVariant={incomingRinging || controllableCall ? "danger" : "primary"}
+        callLabel={incomingRinging || controllableCall ? t("挂断") : t("拨号")}
+        onAnswer={incomingRinging ? () => void handleAnswer(incomingRinging) : undefined}
+        answerLabel={t("接听")}
+        answerDisabled={busy || !voWiFiReady}
         onDigit={handleDigit}
         onPlus={() => setNumber(number + "+")}
         onBackspace={() => setNumber(number.slice(0, -1))}
-        onCall={handlePrimaryCall}
+        onCall={incomingRinging ? () => void handleHangup(incomingRinging) : handlePrimaryCall}
       />
 
       {activeCall ? (
@@ -621,49 +641,39 @@ export function DeviceCallPanel({
 
       {liveCalls.length > 0 ? (
         <div className="mt-3 space-y-2">
-          {liveCalls.map((call) => {
-            const isIncomingRinging = call.state === "ringing" && call.direction === "incoming";
-            return (
-              <div
-                key={call.id}
-                className={cx(
-                  "flex items-center justify-between gap-3 rounded-lg border px-3 py-2",
-                  call.state === "active"
-                    ? "border-emerald-200 bg-emerald-50 dark:border-emerald-500/25 dark:bg-emerald-500/10"
-                    : "border-gray-200 bg-white dark:border-white/10 dark:bg-white/5",
-                )}
-              >
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-medium text-gray-900 dark:text-gray-100">
-                    {call.number || t("未知号码")}
-                  </div>
-                  <div className="text-xs text-gray-500 dark:text-gray-400">
-                    {call.direction === "incoming" ? t("来电") : t("呼出")} · {callStateLabel(call.state, call.direction, t)}
-                    {call.state === "active" ? ` · ${formatCallDuration(
-                      Math.max(0, Math.floor((nowTick - new Date(call.answeredAt || call.startedAt || Date.now()).getTime()) / 1000)),
-                    )}` : ""}
-                    {call.held ? ` · ${t("已暂停")}` : ""}
-                  </div>
+          {liveCalls.map((call) => (
+            <div
+              key={call.id}
+              className={cx(
+                "flex items-center justify-between gap-3 rounded-lg border px-3 py-2",
+                call.state === "active"
+                  ? "border-emerald-200 bg-emerald-50 dark:border-emerald-500/25 dark:bg-emerald-500/10"
+                  : "border-gray-200 bg-white dark:border-white/10 dark:bg-white/5",
+              )}
+            >
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium text-gray-900 dark:text-gray-100">
+                  {call.number || t("未知号码")}
                 </div>
-                <div className="flex shrink-0 items-center gap-2">
-                  {isIncomingRinging ? (
-                    <>
-                      <Button variant="success" size="small" disabled={busy || !voWiFiReady} onClick={() => void handleAnswer(call)}>
-                        {t("接听")}
-                      </Button>
-                      <Button variant="danger" size="small" disabled={busy} onClick={() => void handleHangup(call)}>
-                        {t("挂断")}
-                      </Button>
-                    </>
-                  ) : (
-                    <span className="max-w-[12rem] truncate text-xs text-gray-500 dark:text-gray-400" title={phoneInfoText}>
-                      {phoneInfoLoading ? t("归属地查询中…") : phoneInfoText || t("归属地未知")}
-                    </span>
-                  )}
+                <div className="text-xs text-gray-500 dark:text-gray-400">
+                  {call.direction === "incoming" ? t("来电") : t("呼出")} · {callStateLabel(call.state, call.direction, t)}
+                  {call.state === "active" ? ` · ${formatCallDuration(
+                    Math.max(0, Math.floor((nowTick - new Date(call.answeredAt || call.startedAt || Date.now()).getTime()) / 1000)),
+                  )}` : ""}
+                  {call.held ? ` · ${t("已暂停")}` : ""}
                 </div>
               </div>
-            );
-          })}
+              {/* 归属地：接听/挂断按钮统一放在拨号盘下方，这里只展示归属地。 */}
+              {call.id === activeCall?.id ? (
+                <span
+                  className="max-w-[12rem] shrink-0 truncate text-xs text-gray-500 dark:text-gray-400"
+                  title={phoneInfoText}
+                >
+                  {phoneInfoLoading ? t("归属地查询中…") : phoneInfoText || t("归属地未知")}
+                </span>
+              ) : null}
+            </div>
+          ))}
         </div>
       ) : loaded ? (
         <div className="mt-3 text-xs text-gray-400 dark:text-gray-500">{t("当前没有通话")}</div>

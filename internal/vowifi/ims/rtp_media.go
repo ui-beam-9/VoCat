@@ -22,10 +22,12 @@ const (
 type rtpMedia struct {
 	conn *net.UDPConn
 
-	mu          sync.RWMutex
-	remote      *net.UDPAddr
-	codec       string
-	payloadType byte
+	mu              sync.RWMutex
+	remote          *net.UDPAddr
+	codec           string
+	payloadType     byte
+	remoteDirection string
+	lastInbound     time.Time
 
 	writeMu   sync.Mutex
 	pending   []int16
@@ -198,8 +200,52 @@ func (media *rtpMedia) configureRemote(body []byte) error {
 	media.remote = &net.UDPAddr{IP: address, Port: port}
 	media.codec = codec
 	media.payloadType = payload
+	media.remoteDirection = sdpDirection(body)
 	media.mu.Unlock()
 	return nil
+}
+
+// sdpDirection 解析远端 SDP 的音频方向（以对端视角：sendrecv/sendonly 时对端会发送 RTP）。
+func sdpDirection(body []byte) string {
+	text := strings.ReplaceAll(string(body), "\r\n", "\n")
+	inAudio := false
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		switch {
+		case strings.HasPrefix(line, "m="):
+			fields := strings.Fields(strings.TrimPrefix(line, "m="))
+			inAudio = len(fields) >= 4 && strings.EqualFold(fields[0], "audio")
+		case inAudio && strings.HasPrefix(strings.ToLower(line), "a=sendonly"):
+			return "sendonly"
+		case inAudio && strings.HasPrefix(strings.ToLower(line), "a=sendrecv"):
+			return "sendrecv"
+		case inAudio && strings.HasPrefix(strings.ToLower(line), "a=inactive"):
+			return "inactive"
+		case inAudio && strings.HasPrefix(strings.ToLower(line), "a=recvonly"):
+			return "recvonly"
+		}
+	}
+	return ""
+}
+
+// LastInbound 返回最近一次收到对端 RTP 包的时间。
+func (media *rtpMedia) LastInbound() time.Time {
+	media.mu.RLock()
+	defer media.mu.RUnlock()
+	return media.lastInbound
+}
+
+// RemoteSendsAudio 判断对端当前是否会发送 RTP 音频。SDP 方向属性以对端视角描述：
+// sendrecv/sendonly 表示对端会向本端发送音频；recvonly/inactive 表示对端不发送 RTP。
+func (media *rtpMedia) RemoteSendsAudio() bool {
+	media.mu.RLock()
+	defer media.mu.RUnlock()
+	switch media.remoteDirection {
+	case "", "sendrecv", "sendonly":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseAudioSDP(body []byte) (net.IP, int, []string, map[int]string, error) {
@@ -307,6 +353,9 @@ func (media *rtpMedia) receive() {
 		remote, codec, payload := media.remote, media.codec, media.payloadType
 		if remote != nil && remote.IP.Equal(source.IP) && remote.Port != source.Port {
 			remote.Port = source.Port // symmetric RTP/NAT port learning
+		}
+		if remote != nil && remote.IP.Equal(source.IP) {
+			media.lastInbound = time.Now()
 		}
 		media.mu.Unlock()
 		if remote == nil || !remote.IP.Equal(source.IP) || count < 12 || packet[0]>>6 != 2 || packet[1]&0x7f != payload {
