@@ -226,7 +226,9 @@ func (session *Session) watchOutgoingCall(call *imsCall, key sipTransactionKey) 
 						session.startCallWatchdog(call)
 					}
 				} else if response.StatusCode >= 180 {
-					session.setCallState(call.callID, "ringing")
+					// 183(带 SDP) 与 180 可能乱序到达：一旦进入 early_media 就不再回退为 ringing，
+					// 否则振铃期媒体静默兜底失效（对端拒接后 RTP 停止无法被检测）。
+					session.advanceCallToRinging(call.callID)
 				}
 				if reliableProvisional(response) {
 					go session.sendPRACK(call, response)
@@ -1038,6 +1040,17 @@ func (session *Session) logCallResponse(response *sipResponse, diagnostic string
 		"content_type", safeSIPDiagnostic(response.value("Content-Type")),
 		"body_bytes", len(response.Body),
 	)
+}
+
+// advanceCallToRinging 仅把 dialing 状态的呼叫推进为 ringing；已进入 early_media 的呼叫
+// 不因后续无 SDP 的 1xx（如乱序到达的 180 Ringing）而降级，保持振铃期媒体检测生效。
+func (session *Session) advanceCallToRinging(id string) {
+	session.callMu.Lock()
+	if call := session.calls[id]; call != nil && call.public.State == "dialing" {
+		call.public.State = "ringing"
+		call.stateSince = time.Now().UTC()
+	}
+	session.callMu.Unlock()
 }
 
 func (session *Session) setCallState(id, state string) {
