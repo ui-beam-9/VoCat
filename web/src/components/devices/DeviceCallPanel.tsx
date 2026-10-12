@@ -241,10 +241,10 @@ export function DeviceCallPanel({
 
   const activeCallId = activeCall?.id ?? "";
   const activeCallStarted = activeCall?.answeredAt || activeCall?.startedAt || "";
-  // 音频会话挂接的通话：优先已接通，其次带早期媒体的呼出（回铃音阶段就能听到声音）。
+  // 音频会话挂接的通话：优先已接通，其次带早期媒体的呼出，再次振铃中的呼入（来电也要能听到铃声）。
   // early_media → active 是同一通话 id，接通后无需重连。
   const mediaCall = useMemo(
-    () => activeCall ?? calls.find((call) => call.state === "early_media"),
+    () => activeCall ?? calls.find((call) => call.state === "early_media") ?? calls.find((call) => call.state === "ringing"),
     [activeCall, calls],
   );
 
@@ -263,9 +263,15 @@ export function DeviceCallPanel({
     return Math.max(0, Math.floor((nowTick - started) / 1000));
   }, [activeCallStarted, nowTick]);
 
-  // 通话接通后查询号码归属地（结果在 lib/phoneInfo 内缓存）；失败时通话期间自动重试，避免偶发失败一直显示「归属地未知」。
+  // 需要查询归属地的通话：优先已接通，其次带早期媒体的呼出，再次振铃中的呼入。
+  const phoneInfoCall = useMemo(
+    () => activeCall ?? calls.find((call) => call.state === "early_media") ?? calls.find((call) => call.state === "ringing"),
+    [activeCall, calls],
+  );
+
+  // 查询号码归属地（结果在 lib/phoneInfo 内缓存）；失败时通话期间自动重试，避免偶发失败一直显示「归属地未知」。
   useEffect(() => {
-    const target = (activeCall?.number ?? "").trim();
+    const target = (phoneInfoCall?.number ?? "").trim();
     if (!target) {
       setPhoneInfoText("");
       setPhoneInfoLoading(false);
@@ -298,7 +304,7 @@ export function DeviceCallPanel({
       cancelled = true;
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
     };
-  }, [activeCall?.number]);
+  }, [phoneInfoCall?.number]);
 
   // 通话接通或进入早期媒体（回铃音）后建立音频桥，通话结束或切换通话时释放。
   useEffect(() => {
@@ -669,15 +675,17 @@ export function DeviceCallPanel({
                   {call.held ? ` · ${t("已暂停")}` : ""}
                 </div>
               </div>
-              {/* 归属地：接听/挂断按钮统一放在拨号盘下方，这里只展示归属地。 */}
-              {call.id === activeCall?.id ? (
-                <span
-                  className="max-w-[12rem] shrink-0 truncate text-xs text-gray-500 dark:text-gray-400"
-                  title={phoneInfoText}
-                >
-                  {phoneInfoLoading ? t("归属地查询中…") : phoneInfoText || t("归属地未知")}
-                </span>
-              ) : null}
+              {/* 归属地：所有通话都显示，查询中的通话单独显示 loading。 */}
+              <span
+                className="max-w-[12rem] shrink-0 truncate text-xs text-gray-500 dark:text-gray-400"
+                title={call.id === phoneInfoCall?.id ? phoneInfoText : ""}
+              >
+                {call.id === phoneInfoCall?.id
+                  ? phoneInfoLoading
+                    ? t("归属地查询中…")
+                    : phoneInfoText || t("归属地未知")
+                  : t("归属地未知")}
+              </span>
             </div>
           ))}
         </div>
