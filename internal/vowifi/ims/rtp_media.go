@@ -30,12 +30,13 @@ type rtpMedia struct {
 	remoteDirection string
 	lastInbound     time.Time
 
-	writeMu   sync.Mutex
-	pending   []int16
-	sequence  uint16
-	timestamp uint32
-	ssrc      uint32
-	dropCount uint64 // payload 不匹配累计丢弃数（仅用于诊断日志降频）
+	writeMu      sync.Mutex
+	pending      []int16
+	sequence     uint16
+	timestamp    uint32
+	ssrc         uint32
+	dropCount    uint64 // payload 不匹配累计丢弃数（仅用于诊断日志降频）
+	firstRtpSeen bool   // 首个有效 RTP 包日志标记
 
 	downlink chan []int16
 	closed   chan struct{}
@@ -217,7 +218,7 @@ func (media *rtpMedia) configureRemote(body []byte) error {
 	if logger != nil {
 		logger.Info("IMS RTP remote configured",
 			"category", "call",
-			"remote", fmt.Sprintf("%s:%d", address, port),
+			"remote", (&net.UDPAddr{IP: address, Port: port}).String(),
 			"codec", codec,
 			"payload_type", payload,
 			"local_port", media.conn.LocalAddr().(*net.UDPAddr).Port,
@@ -386,7 +387,7 @@ func (media *rtpMedia) receive() {
 				if media.dropCount%100 == 1 {
 					media.logger.Warn("IMS RTP packet dropped (payload type mismatch)",
 						"category", "call",
-						"source", fmt.Sprintf("%s:%d", source.IP, source.Port),
+						"source", source.String(),
 						"payload_type", packet[1]&0x7f,
 						"want_payload_type", payload,
 						"codec", codec,
@@ -395,6 +396,16 @@ func (media *rtpMedia) receive() {
 				}
 			}
 			continue
+		}
+		// 首个有效 RTP 包到达时记录，确认媒体流确实已建立。
+		if !media.firstRtpSeen && media.logger != nil {
+			media.firstRtpSeen = true
+			media.logger.Info("IMS RTP first packet received",
+				"category", "call",
+				"source", source.String(),
+				"payload_type", payload,
+				"codec", codec,
+			)
 		}
 		header := 12 + int(packet[0]&0x0f)*4
 		if packet[0]&0x10 != 0 {

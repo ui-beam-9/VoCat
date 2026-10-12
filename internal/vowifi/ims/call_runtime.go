@@ -220,8 +220,8 @@ func (session *Session) watchOutgoingCall(call *imsCall, key sipTransactionKey) 
 				session.setCallDiagnostic(call.callID, response.StatusCode, diagnostic)
 				session.updateCallDialogFromResponse(call, response)
 				if len(response.Body) > 0 {
+					call.media.setLogger(session.imsLogger())
 					if mediaErr := call.media.configureRemote(response.Body); mediaErr == nil {
-						call.media.setLogger(session.imsLogger())
 						session.setCallMediaReady(call.callID)
 						session.setCallState(call.callID, "early_media")
 						session.startCallWatchdog(call)
