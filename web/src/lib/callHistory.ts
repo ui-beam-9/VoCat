@@ -3,7 +3,7 @@ import { api } from "../api";
 // 通话记录（服务端数据库存储）。通话记录由服务端实时写入，前端只读/清空。
 
 export type CallDirection = "incoming" | "outgoing";
-export type CallOutcome = "answered" | "missed" | "failed";
+export type CallOutcome = "answered" | "missed" | "failed" | "rejected";
 
 export interface CallHistoryEntry {
   id: number;

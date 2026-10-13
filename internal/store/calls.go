@@ -15,6 +15,7 @@ const (
 	callOutcomeAnswered   = "answered"
 	callOutcomeMissed     = "missed"
 	callOutcomeFailed     = "failed"
+	callOutcomeRejected   = "rejected"
 )
 
 // AppendCallHistory persists one finished call and returns the stored row.
@@ -30,8 +31,8 @@ func (s *Store) AppendCallHistory(ctx context.Context, entry CallHistoryEntry) (
 	if entry.Direction != callDirectionIncoming && entry.Direction != callDirectionOutgoing {
 		return CallHistoryEntry{}, errors.New("call history direction must be incoming or outgoing")
 	}
-	if entry.Outcome != callOutcomeAnswered && entry.Outcome != callOutcomeMissed && entry.Outcome != callOutcomeFailed {
-		return CallHistoryEntry{}, errors.New("call history outcome must be answered, missed, or failed")
+	if entry.Outcome != callOutcomeAnswered && entry.Outcome != callOutcomeMissed && entry.Outcome != callOutcomeFailed && entry.Outcome != callOutcomeRejected {
+		return CallHistoryEntry{}, errors.New("call history outcome must be answered, missed, failed, or rejected")
 	}
 	now := time.Now().UTC()
 	if entry.StartedAt.IsZero() {

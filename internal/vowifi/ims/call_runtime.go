@@ -349,7 +349,8 @@ func (session *Session) HangupCall(ctx context.Context, id string) error {
 		if err := respond(response); err != nil {
 			return err
 		}
-		session.finishCall(id, "ended", 0, "")
+		// 记录 486 响应码：通话记录据此把本地拒接（486）与未接（对方取消，无响应码）区分开。
+		session.finishCall(id, "ended", 486, "")
 		return nil
 	}
 	method := "BYE"

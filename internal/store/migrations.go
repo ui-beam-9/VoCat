@@ -550,6 +550,31 @@ func migrationStatements(version int) []string {
 				updated_at INTEGER NOT NULL
 			)`,
 		}
+	case 30:
+		return []string{
+			// 通话结果新增 rejected（本地拒接）：SQLite 无法修改 CHECK 约束，
+			// 重建 call_history 表放宽取值范围并保留历史记录。
+			`CREATE TABLE call_history_new (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				device_id TEXT NOT NULL DEFAULT '',
+				number TEXT NOT NULL,
+				direction TEXT NOT NULL CHECK (direction IN ('incoming', 'outgoing')),
+				outcome TEXT NOT NULL CHECK (outcome IN ('answered', 'missed', 'failed', 'rejected')),
+				started_at INTEGER NOT NULL,
+				ended_at INTEGER NOT NULL,
+				duration_seconds INTEGER NOT NULL DEFAULT 0,
+				created_at INTEGER NOT NULL,
+				call_id TEXT NOT NULL DEFAULT ''
+			)`,
+			`INSERT INTO call_history_new (id, device_id, number, direction, outcome, started_at, ended_at, duration_seconds, created_at, call_id)
+				SELECT id, device_id, number, direction, outcome, started_at, ended_at, duration_seconds, created_at, call_id FROM call_history`,
+			`DROP TABLE call_history`,
+			`ALTER TABLE call_history_new RENAME TO call_history`,
+			`CREATE INDEX IF NOT EXISTS call_history_started_at_idx
+				ON call_history(started_at DESC, id DESC)`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS call_history_call_id_idx
+				ON call_history(call_id) WHERE call_id <> ''`,
+		}
 	default:
 		return nil
 	}

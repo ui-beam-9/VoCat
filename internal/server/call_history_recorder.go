@@ -70,7 +70,7 @@ func isTerminalCallState(state string) bool {
 }
 
 // callHistoryEntryFromCall 把一通已结束的 IMS 通话映射为通话记录。
-// outcome：failed / answered / missed（未接通，由前端按呼叫方向显示为“未接”或“未接通”）。
+// outcome：failed / answered / rejected（本地拒接）/ missed（未接通，由前端按呼叫方向显示为“未接”或“未接通”）。
 func callHistoryEntryFromCall(deviceID string, call vowifi.Call, now time.Time) (store.CallHistoryEntry, bool) {
 	number := strings.TrimSpace(call.Number)
 	if number == "" {
@@ -98,6 +98,10 @@ func callHistoryEntryFromCall(deviceID string, call vowifi.Call, now time.Time) 
 		if call.AnsweredAt.Before(endedAt) {
 			duration = int(endedAt.Sub(*call.AnsweredAt).Seconds())
 		}
+	case direction == "incoming" && call.SIPCode == 486:
+		// 呼入振铃期被本地挂断时 IMS 层向主叫回 486 Busy Here 并记入 SIPCode；
+		// 对方取消（CANCEL）不携带响应码，仍为未接。
+		outcome = "rejected"
 	}
 	if duration < 0 {
 		duration = 0

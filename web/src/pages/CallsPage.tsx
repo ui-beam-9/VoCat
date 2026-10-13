@@ -116,6 +116,7 @@ export default function CallsPage() {
     (outcome: CallOutcome, direction: CallDirection) => {
       if (outcome === "answered") return t("已接通");
       if (outcome === "failed") return t("呼叫失败");
+      if (outcome === "rejected") return t("已拒接");
       return direction === "incoming" ? t("未接来电") : t("未接通");
     },
     [t],
