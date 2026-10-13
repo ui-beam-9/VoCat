@@ -48,6 +48,7 @@ export function CallHistoryList({
     <div className="space-y-1 overflow-y-auto pr-1" style={{ maxHeight: VISIBLE_ROWS_HEIGHT }}>
       {entries.map((entry) => {
         const name = contactNameByNumber.get(entry.number);
+        const outcome = outcomeLabel(entry.outcome, entry.direction);
         return (
           <div
             key={entry.id}
@@ -65,8 +66,8 @@ export function CallHistoryList({
                 </span>
               )}
               <span className="block text-xs text-gray-500 dark:text-gray-400">
-                {entry.direction === "incoming" ? t("来电") : t("呼出")} ·{" "}
-                {outcomeLabel(entry.outcome, entry.direction)} · {formatTime(entry.startedAt)}
+                {entry.direction === "incoming" ? t("来电") : t("呼出")}
+                {outcome ? ` · ${outcome}` : ""} · {formatTime(entry.startedAt)}
                 {entry.durationSeconds > 0 ? ` · ${formatDuration(entry.durationSeconds)}` : ""}
                 {locationByNumber?.get(entry.number) ? ` · ${locationByNumber.get(entry.number)}` : ""}
               </span>

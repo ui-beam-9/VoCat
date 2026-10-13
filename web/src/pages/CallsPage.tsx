@@ -114,9 +114,10 @@ export default function CallsPage() {
 
   const outcomeLabel = useCallback(
     (outcome: CallOutcome, direction: CallDirection) => {
-      if (outcome === "answered") return t("已接通");
+      // answered 不显示 outcome 文字（有时长即表示接通）。
+      if (outcome === "answered") return "";
       if (outcome === "failed") return t("呼叫失败");
-      if (outcome === "rejected") return t("已拒接");
+      if (outcome === "rejected") return direction === "incoming" ? t("已拒接") : t("对方已拒接");
       return direction === "incoming" ? t("未接来电") : t("未接通");
     },
     [t],

@@ -58,3 +58,6 @@ Thumbs.db
 .claude/
 .worktrees/
 agents_chat/
+
+# ---- Local data (uploaded ringtone files etc.) ----
+data/

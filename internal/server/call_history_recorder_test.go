@@ -51,11 +51,63 @@ func TestCallHistoryEntryFromCallOutcome(t *testing.T) {
 		t.Fatalf("outcome = %q, want answered", entry.Outcome)
 	}
 
-	// 呼出方向不判定拒接。
+	// 呼出被对端拒接（486 Busy Here）：同样判定为拒接，前端按方向显示「对方已拒接」。
 	outgoing := base
 	outgoing.Direction = "outgoing"
+	outgoing.State = "failed"
 	outgoing.SIPCode = 486
 	entry, ok = callHistoryEntryFromCall("dev-1", outgoing, now)
+	if !ok {
+		t.Fatal("expected entry")
+	}
+	if entry.Outcome != "rejected" {
+		t.Fatalf("outcome = %q, want rejected", entry.Outcome)
+	}
+
+	// 呼出被对端拒接（603 Decline）：同样判定为拒接。
+	outgoing603 := base
+	outgoing603.Direction = "outgoing"
+	outgoing603.State = "failed"
+	outgoing603.SIPCode = 603
+	entry, ok = callHistoryEntryFromCall("dev-1", outgoing603, now)
+	if !ok {
+		t.Fatal("expected entry")
+	}
+	if entry.Outcome != "rejected" {
+		t.Fatalf("outcome = %q, want rejected", entry.Outcome)
+	}
+
+	// 呼出无人接听（480 Temporarily Unavailable）：未接通。
+	outgoing480 := base
+	outgoing480.Direction = "outgoing"
+	outgoing480.State = "failed"
+	outgoing480.SIPCode = 480
+	entry, ok = callHistoryEntryFromCall("dev-1", outgoing480, now)
+	if !ok {
+		t.Fatal("expected entry")
+	}
+	if entry.Outcome != "missed" {
+		t.Fatalf("outcome = %q, want missed", entry.Outcome)
+	}
+
+	// 呼出空号（404 Not Found）：未接通。
+	outgoing404 := base
+	outgoing404.Direction = "outgoing"
+	outgoing404.State = "failed"
+	outgoing404.SIPCode = 404
+	entry, ok = callHistoryEntryFromCall("dev-1", outgoing404, now)
+	if !ok {
+		t.Fatal("expected entry")
+	}
+	if entry.Outcome != "missed" {
+		t.Fatalf("outcome = %q, want missed", entry.Outcome)
+	}
+
+	// 呼出网络失败（事务超时，无 SIPCode）：未接通。
+	outgoingTimeout := base
+	outgoingTimeout.Direction = "outgoing"
+	outgoingTimeout.State = "failed"
+	entry, ok = callHistoryEntryFromCall("dev-1", outgoingTimeout, now)
 	if !ok {
 		t.Fatal("expected entry")
 	}

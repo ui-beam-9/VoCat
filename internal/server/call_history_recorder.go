@@ -91,16 +91,15 @@ func callHistoryEntryFromCall(deviceID string, call vowifi.Call, now time.Time) 
 	outcome := "missed"
 	duration := 0
 	switch {
-	case call.State == "failed":
-		outcome = "failed"
 	case call.AnsweredAt != nil:
 		outcome = "answered"
 		if call.AnsweredAt.Before(endedAt) {
 			duration = int(endedAt.Sub(*call.AnsweredAt).Seconds())
 		}
-	case direction == "incoming" && call.SIPCode == 486:
-		// 呼入振铃期被本地挂断时 IMS 层向主叫回 486 Busy Here 并记入 SIPCode；
-		// 对方取消（CANCEL）不携带响应码，仍为未接。
+	case call.SIPCode == 486 || call.SIPCode == 603:
+		// 486 Busy Here / 603 Decline：
+		// - 呼入为网页本地拒接（IMS 层向主叫回 486）
+		// - 呼出为对方振铃后拒接（运营商回 486/603）
 		outcome = "rejected"
 	}
 	if duration < 0 {
