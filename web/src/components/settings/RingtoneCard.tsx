@@ -119,7 +119,7 @@ export function RingtoneCard() {
   const busy = loading || saving || uploading || deleting;
 
   return (
-    <div className="ui-card group relative overflow-hidden p-8">
+    <div className="ui-card group relative overflow-hidden p-8 lg:col-span-2">
       <CardDecor />
       <div className="relative z-10 mb-6 flex items-center gap-3">
         <CardIcon>
