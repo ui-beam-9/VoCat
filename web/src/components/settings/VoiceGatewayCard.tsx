@@ -36,6 +36,7 @@ interface VoiceGatewayConfig {
   transport: string;
   realm: string;
   externalIp: string;
+  backend: string;
   rtpPortMin: number;
   rtpPortMax: number;
   users: VoiceGatewayUser[];
@@ -44,6 +45,7 @@ interface VoiceGatewayConfig {
 interface VoiceGatewayDeviceStatus {
   deviceId: string;
   audioDevice: string;
+  backend: string;
   active: boolean;
   detail: string;
 }
@@ -73,6 +75,7 @@ interface VoiceGatewayForm {
   transport: string;
   realm: string;
   externalIp: string;
+  backend: string;
   rtpPortMin: string;
   rtpPortMax: string;
   users: VoiceGatewayUser[];
@@ -105,6 +108,7 @@ function configToForm(config: VoiceGatewayConfig): VoiceGatewayForm {
     transport: config.transport || "udp",
     realm: config.realm || "",
     externalIp: config.externalIp || "",
+    backend: config.backend || "auto",
     rtpPortMin: String(config.rtpPortMin ?? 10000),
     rtpPortMax: String(config.rtpPortMax ?? 20000),
     users: Array.isArray(config.users) ? config.users : [],
@@ -119,6 +123,7 @@ export function VoiceGatewayCard() {
     transport: "udp",
     realm: "vocat.local",
     externalIp: "",
+    backend: "auto",
     rtpPortMin: 10000,
     rtpPortMax: 20000,
     users: [],
@@ -178,6 +183,7 @@ export function VoiceGatewayCard() {
         transport: form.transport || "udp",
         realm: form.realm,
         externalIp: form.externalIp,
+        backend: form.backend || "auto",
         rtpPortMin: Number(form.rtpPortMin) || 0,
         rtpPortMax: Number(form.rtpPortMax) || 0,
         users: form.users.map((user) => ({
@@ -207,6 +213,12 @@ export function VoiceGatewayCard() {
     label: d.name ? `${d.name} (${d.id})` : d.id,
   }));
 
+  const backendOptions: SelectOption[] = [
+    { value: "auto", label: t("自动") },
+    { value: "ims", label: "IMS (VoWiFi)" },
+    { value: "cs", label: t("电路域 (CS)") },
+  ];
+
   return (
     <div className="ui-card group relative overflow-hidden p-8 lg:col-span-2">
       <CardDecor />
@@ -215,7 +227,7 @@ export function VoiceGatewayCard() {
           <CardIcon>
             <CallRegular className="text-[24px]" />
           </CardIcon>
-          <CardTitle title={t("语音网关")} subtitle={t("手机软电话通过 4G 模组接打电路域电话")} />
+          <CardTitle title={t("语音网关")} subtitle={t("手机软电话通过 4G 模组接打电话（VoWiFi 或电路域）")} />
         </div>
         <div className="flex items-center gap-3">
           <Switch
@@ -256,6 +268,9 @@ export function VoiceGatewayCard() {
             </Field>
             <Field label={t("传输协议")}>
               <Select value={form.transport} onChange={(transport) => patch({ transport })} options={TRANSPORT_OPTIONS} />
+            </Field>
+            <Field label={t("桥接后端")} hint={t("自动模式优先使用 VoWiFi，不可用时回退电路域（需为设备配置声卡）")}>
+              <Select value={form.backend} onChange={(backend) => patch({ backend })} options={backendOptions} />
             </Field>
             <Field label={t("认证域")}>
               <Input value={form.realm} onChange={(e) => patch({ realm: e.target.value })} placeholder="vocat.local" className="font-mono" />
@@ -386,7 +401,9 @@ export function VoiceGatewayCard() {
                         <Tag type={device.active ? "success" : "danger"}>{device.active ? t("活跃") : t("未激活")}</Tag>
                       </div>
                       <div className="text-xs text-gray-500 dark:text-gray-400">
-                        {t("音频设备")}: {device.audioDevice || t("未配置音频设备")}
+                        {device.backend === "ims"
+                          ? t("桥接后端：IMS (VoWiFi)，无需声卡")
+                          : `${t("音频设备")}: ${device.audioDevice || t("未配置音频设备")}`}
                       </div>
                     </div>
                     {device.detail ? (

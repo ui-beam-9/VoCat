@@ -1,7 +1,8 @@
-// Package voicegateway 协调 SIP 网关与各设备的 CS 域语音桥接。
+// Package voicegateway 协调 SIP 网关与各设备的语音桥接。
 //
-// 它负责：读取/保存语音网关配置、按配置启动 SIP 注册服务、为每台配置了
-// ALSA 音频设备的模组创建通话管理器，并把软电话的呼叫信令路由到对应设备。
+// 它负责：读取/保存语音网关配置、按配置启动 SIP 注册服务、为每台绑定了
+// 软电话账号的设备创建通话管理器（IMS 或 CS 后端），并把软电话的呼叫信令
+// 路由到对应设备。
 package voicegateway
 
 import (
@@ -17,9 +18,12 @@ import (
 	"github.com/emiago/sipgo/sip"
 
 	"vocat/internal/cscall"
+	"vocat/internal/imscall"
 	"vocat/internal/modem"
 	"vocat/internal/sipgw"
 	"vocat/internal/store"
+	"vocat/internal/vowifi"
+	"vocat/internal/vowifi/ims"
 )
 
 // SettingKey 是语音网关配置在 app_settings 中的键名。
@@ -39,17 +43,29 @@ type Store interface {
 	UpsertAppSetting(ctx context.Context, value store.AppSetting) error
 }
 
+// VoWiFi 是本包需要的设备级 IMS 呼叫控制与媒体能力（由 vowifi runtime Manager 实现）。
+type VoWiFi interface {
+	Calls(string) ([]vowifi.Call, error)
+	DialCall(context.Context, string, string) (vowifi.Call, error)
+	AnswerCall(context.Context, string, string) (vowifi.Call, error)
+	HangupCall(context.Context, string, string) error
+	CallMedia(context.Context, string, string) (vowifi.CallMedia, error)
+}
+
 // Options 构造协调器所需依赖。
 type Options struct {
 	Devices DeviceAT
 	Store   Store
-	Logger  *slog.Logger
+	// VoWiFi 可选；为空时 IMS 桥接后端不可用，仅能使用 CS 后端。
+	VoWiFi VoWiFi
+	Logger *slog.Logger
 }
 
 // DeviceStatus 描述单台设备的桥接状态。
 type DeviceStatus struct {
 	DeviceID    string `json:"device_id"`
 	AudioDevice string `json:"audio_device"`
+	Backend     string `json:"backend,omitempty"`
 	Active      bool   `json:"active"`
 	Detail      string `json:"detail,omitempty"`
 }
@@ -68,14 +84,24 @@ type Status struct {
 	StartedAt  *time.Time     `json:"started_at,omitempty"`
 }
 
+// callHandler 抽象单设备的呼叫处理能力（cscall.Manager 或 imscall.Manager）。
+type callHandler interface {
+	HandleOutboundInvite(deviceID string, req *sip.Request, tx sip.ServerTransaction)
+	HandleClientCancel(callID string) bool
+	HandleClientBye(callID string) bool
+	Stop()
+}
+
 type bridge struct {
-	manager *cscall.Manager
+	handler callHandler
+	backend string // sipgw.BackendIMS 或 sipgw.BackendCS
 }
 
 // Manager 协调 SIP 网关与逐设备通话桥。
 type Manager struct {
 	devices DeviceAT
 	store   Store
+	vowifi  VoWiFi
 	logger  *slog.Logger
 
 	mu        sync.Mutex
@@ -103,6 +129,7 @@ func New(options Options) (*Manager, error) {
 	return &Manager{
 		devices: options.Devices,
 		store:   options.Store,
+		vowifi:  options.VoWiFi,
 		logger:  logger,
 		cfg:     sipgw.DefaultConfig(),
 		bridges: make(map[string]*bridge),
@@ -174,6 +201,13 @@ func (manager *Manager) applyLocked(ctx context.Context, incoming sipgw.Config) 
 }
 
 func (manager *Manager) startBridgeLocked(ctx context.Context, deviceID string) error {
+	backend := manager.resolveBackend(deviceID)
+	if backend == sipgw.BackendIMS {
+		callManager := imscall.NewManager(deviceID, manager.vowifi, manager.registrar, manager.logger)
+		manager.bridges[deviceID] = &bridge{handler: callManager, backend: sipgw.BackendIMS}
+		return nil
+	}
+
 	device, err := manager.store.Device(ctx, deviceID)
 	if err != nil {
 		return fmt.Errorf("读取设备配置失败: %w", err)
@@ -185,13 +219,36 @@ func (manager *Manager) startBridgeLocked(ctx context.Context, deviceID string) 
 	adapter := &deviceATAdapter{deviceID: deviceID, devices: manager.devices}
 	controller := cscall.NewATController(adapter, manager.logger)
 	callManager := cscall.NewManager(deviceID, audioDevice, controller, manager.registrar, manager.logger)
-	manager.bridges[deviceID] = &bridge{manager: callManager}
+	manager.bridges[deviceID] = &bridge{handler: callManager, backend: sipgw.BackendCS}
 	return nil
+}
+
+// resolveBackend 按配置与实际能力确定设备的桥接后端。
+// auto 模式下设备 IMS 会话就绪（Calls 探测成功）时用 IMS，否则回退 CS。
+func (manager *Manager) resolveBackend(deviceID string) string {
+	configured := manager.cfg.Backend
+	if configured == sipgw.BackendCS {
+		return sipgw.BackendCS
+	}
+	if manager.vowifi == nil {
+		if configured == sipgw.BackendIMS {
+			manager.logger.Warn("未注入 VoWiFi 能力，IMS 桥接后端不可用，回退 CS", "device_id", deviceID)
+		}
+		return sipgw.BackendCS
+	}
+	if configured == sipgw.BackendIMS {
+		return sipgw.BackendIMS
+	}
+	// auto：探测设备 IMS 会话是否就绪。
+	if _, err := manager.vowifi.Calls(deviceID); err == nil {
+		return sipgw.BackendIMS
+	}
+	return sipgw.BackendCS
 }
 
 func (manager *Manager) stopLocked() {
 	for deviceID, item := range manager.bridges {
-		item.manager.Stop()
+		item.handler.Stop()
 		delete(manager.bridges, deviceID)
 	}
 	if manager.registrar != nil {
@@ -223,7 +280,7 @@ func (manager *Manager) routeInvite(deviceID string, req *sip.Request, tx sip.Se
 		_ = tx.Respond(sip.NewResponseFromRequest(req, 480, "Temporarily Unavailable", nil))
 		return
 	}
-	item.manager.HandleOutboundInvite(deviceID, req, tx)
+	item.handler.HandleOutboundInvite(deviceID, req, tx)
 }
 
 func (manager *Manager) routeCancel(deviceID string, req *sip.Request, _ sip.ServerTransaction) {
@@ -233,7 +290,7 @@ func (manager *Manager) routeCancel(deviceID string, req *sip.Request, _ sip.Ser
 	if item == nil || req.CallID() == nil {
 		return
 	}
-	item.manager.HandleClientCancel(req.CallID().Value())
+	item.handler.HandleClientCancel(req.CallID().Value())
 }
 
 func (manager *Manager) routeBye(deviceID string, req *sip.Request, _ sip.ServerTransaction) {
@@ -243,7 +300,22 @@ func (manager *Manager) routeBye(deviceID string, req *sip.Request, _ sip.Server
 	if item == nil || req.CallID() == nil {
 		return
 	}
-	item.manager.HandleClientBye(req.CallID().Value())
+	item.handler.HandleClientBye(req.CallID().Value())
+}
+
+// HandleIncomingCall 把 IMS 来电转给对应设备的 IMS 桥（CS 后端设备忽略，走自身 URC）。
+func (manager *Manager) HandleIncomingCall(ctx context.Context, call ims.ReceivedCall) {
+	manager.mu.Lock()
+	item := manager.bridges[call.DeviceID]
+	manager.mu.Unlock()
+	if item == nil || item.backend != sipgw.BackendIMS {
+		return
+	}
+	imsManager, ok := item.handler.(*imscall.Manager)
+	if !ok {
+		return
+	}
+	imsManager.HandleIncomingCall(ctx, call)
 }
 
 // --- 配置读写 ---
@@ -327,8 +399,10 @@ func (manager *Manager) Status(ctx context.Context) Status {
 	lastError := manager.lastError
 	startedAt := manager.startedAt
 	active := make(map[string]bool, len(manager.bridges))
-	for deviceID := range manager.bridges {
+	backends := make(map[string]string, len(manager.bridges))
+	for deviceID, item := range manager.bridges {
 		active[deviceID] = true
+		backends[deviceID] = item.backend
 	}
 	manager.mu.Unlock()
 
@@ -357,10 +431,10 @@ func (manager *Manager) Status(ctx context.Context) Status {
 		if user.DeviceID == "" {
 			continue
 		}
-		entry := DeviceStatus{DeviceID: user.DeviceID, Active: active[user.DeviceID]}
+		entry := DeviceStatus{DeviceID: user.DeviceID, Active: active[user.DeviceID], Backend: backends[user.DeviceID]}
 		if device, err := manager.store.Device(ctx, user.DeviceID); err == nil {
 			entry.AudioDevice = strings.TrimSpace(device.AudioDevice)
-			if entry.AudioDevice == "" {
+			if entry.AudioDevice == "" && entry.Backend != sipgw.BackendIMS {
 				entry.Detail = "设备未配置 audio_device"
 			}
 		} else {

@@ -1487,6 +1487,11 @@ export const EN_DICT: Record<string, string> = {
   // ---- CS 语音网关 ----
   "语音网关": "Voice Gateway",
   "手机软电话通过 4G 模组接打电路域电话": "Register a Linphone softphone to make and receive circuit-switched calls over the 4G modem",
+  "手机软电话通过 4G 模组接打电话（VoWiFi 或电路域）": "Register a Linphone softphone to make and receive calls over the 4G modem (VoWiFi or circuit-switched)",
+  "桥接后端": "Call backend",
+  "电路域 (CS)": "Circuit-switched (CS)",
+  "自动模式优先使用 VoWiFi，不可用时回退电路域（需为设备配置声卡）": "Auto prefers VoWiFi and falls back to circuit-switched when unavailable (requires an audio device for the device)",
+  "桥接后端：IMS (VoWiFi)，无需声卡": "Backend: IMS (VoWiFi), no sound card needed",
   "启用语音网关": "Enable the voice gateway",
   "SIP 监听地址": "SIP listen address",
   "传输协议": "Transport",

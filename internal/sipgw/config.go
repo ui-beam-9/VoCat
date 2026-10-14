@@ -45,12 +45,24 @@ type Config struct {
 	Realm string `json:"realm"`
 	// ExternalIP 是公网/对外 IP，留空时自动探测。
 	ExternalIP string `json:"external_ip"`
+	// Backend 选择呼叫桥接后端：auto（自动，默认）/ ims（VoWiFi）/ cs（电路域）。
+	Backend string `json:"backend"`
 	// RTPPortMin / RTPPortMax 描述允许的媒体端口范围（仅供展示与文档用途）。
 	RTPPortMin int `json:"rtp_port_min"`
 	RTPPortMax int `json:"rtp_port_max"`
 	// Users 是允许注册的软电话账号列表。
 	Users []User `json:"users"`
 }
+
+// 呼叫桥接后端取值。
+const (
+	// BackendAuto 自动选择：设备具备 IMS 能力时用 IMS，否则回退 CS。
+	BackendAuto = "auto"
+	// BackendIMS 使用 VoWiFi/IMS 桥接。
+	BackendIMS = "ims"
+	// BackendCS 使用电路域（CS）桥接。
+	BackendCS = "cs"
+)
 
 // DefaultConfig 返回带默认值的配置。
 func DefaultConfig() Config {
@@ -78,6 +90,10 @@ func (config Config) Normalize() Config {
 		config.Realm = DefaultRealm
 	}
 	config.ExternalIP = strings.TrimSpace(config.ExternalIP)
+	config.Backend = strings.ToLower(strings.TrimSpace(config.Backend))
+	if config.Backend == "" {
+		config.Backend = BackendAuto
+	}
 	if config.RTPPortMin <= 0 {
 		config.RTPPortMin = DefaultRTPPortMin
 	}
@@ -119,6 +135,11 @@ func (config Config) Validate() error {
 	}
 	if normalized.ExternalIP != "" && net.ParseIP(normalized.ExternalIP) == nil {
 		return errors.New("sip external_ip must be a valid IP address")
+	}
+	switch normalized.Backend {
+	case BackendAuto, BackendIMS, BackendCS:
+	default:
+		return fmt.Errorf("sip backend %q is invalid (must be auto, ims or cs)", config.Backend)
 	}
 	for _, user := range normalized.Users {
 		if user.Password == "" {

@@ -564,6 +564,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	voiceGateway, err := voicegateway.New(voicegateway.Options{
 		Devices: deviceManager,
 		Store:   database,
+		VoWiFi:  vowifiManager,
 		Logger:  logger.With("category", "voicegateway"),
 	})
 	if err != nil {
@@ -627,6 +628,8 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 			Time:        call.Timestamp,
 			Environment: "vowifi",
 		})
+		// 同步推给语音网关：若该设备使用 IMS 桥接后端，则向软电话发起呼叫。
+		voiceGateway.HandleIncomingCall(ctx, call)
 		return nil
 	}
 	go handler.StartLogRetentionLoop(pollContext, time.Minute)

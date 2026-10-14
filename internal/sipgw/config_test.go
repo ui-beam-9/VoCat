@@ -49,3 +49,27 @@ func TestConfigValidate(t *testing.T) {
 		t.Fatal("缺少密码应报错")
 	}
 }
+
+// TestConfigBackend 覆盖 backend 的归一化与取值校验。
+func TestConfigBackend(t *testing.T) {
+	// 空值归一化为 auto。
+	if got := (Config{}).Normalize().Backend; got != BackendAuto {
+		t.Fatalf("空 backend 应归一化为 auto，得到 %q", got)
+	}
+	// 大小写与空白清洗。
+	if got := (Config{Backend: " IMS "}).Normalize().Backend; got != BackendIMS {
+		t.Fatalf("backend 清洗失败，得到 %q", got)
+	}
+	// 合法取值通过校验。
+	for _, backend := range []string{BackendAuto, BackendIMS, BackendCS} {
+		cfg := Config{Listen: "0.0.0.0:5060", Backend: backend}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("backend=%q 应通过校验: %v", backend, err)
+		}
+	}
+	// 非法取值被拒绝。
+	bad := Config{Listen: "0.0.0.0:5060", Backend: "pstn"}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("非法 backend 应报错")
+	}
+}
