@@ -63,16 +63,17 @@ type Manager struct {
 
 // imsCall 保存一次通话相关的资源。
 type imsCall struct {
-	bridge       *MediaBridge
-	clientReq    *sip.Request
-	clientTx     sip.ClientTransaction
-	serverTx     sip.ServerTransaction
-	serverReq    *sip.Request
-	cancelFunc   context.CancelFunc
-	isOutbound   bool
-	earlyBridged bool // 已通过 183 早期媒体起桥
-	finalSent    bool // INVITE 服务端事务已送最终响应
-	answered200  bool // 外呼已向软电话发送 200 OK
+	bridge        *MediaBridge
+	clientReq     *sip.Request
+	clientTx      sip.ClientTransaction
+	serverTx      sip.ServerTransaction
+	serverReq     *sip.Request
+	cancelFunc    context.CancelFunc
+	isOutbound    bool
+	mediaAttached bool // IMS 通话媒体已挂接到媒体桥（幂等标记）
+	earlyBridged  bool // 已尝试通过 183 早期媒体起桥（只尝试一次）
+	finalSent     bool // INVITE 服务端事务已送最终响应
+	answered200   bool // 外呼已向软电话发送 200 OK
 }
 
 // NewManager 创建 IMS 呼叫管理器。
@@ -272,9 +273,11 @@ func (manager *Manager) runOutboundSetup(call *imsCall, localIP string) {
 			return
 		case "early_media", "ringing":
 			// 早期媒体就绪：回 183 让软电话播放回铃音并提前起桥。
+			// 只尝试一次，避免 183 发送失败后每 500ms 重复挂接媒体、重发 183。
 			if current.MediaReady && !call.earlyBridged {
-				if manager.startEarlyMedia(call, localIP) {
-					call.earlyBridged = true
+				call.earlyBridged = true
+				if !manager.startEarlyMedia(call, localIP) {
+					manager.logger.Warn("早期媒体挂接未完成，等待接通后再起桥")
 				}
 			}
 		case "active":
@@ -282,7 +285,8 @@ func (manager *Manager) runOutboundSetup(call *imsCall, localIP string) {
 			manager.state = stateConnected
 			number := manager.number
 			manager.mu.Unlock()
-			if !call.earlyBridged && !manager.attachMedia(call) {
+			if !manager.attachMedia(call) {
+				manager.logger.Error("挂接 IMS 通话媒体失败，外呼结束")
 				manager.endCall(500, "Internal Server Error", false, true)
 				return
 			}
@@ -317,6 +321,10 @@ func (manager *Manager) startEarlyMedia(call *imsCall, localIP string) bool {
 // attachMedia 获取 IMS 通话媒体并启动媒体桥，幂等。
 func (manager *Manager) attachMedia(call *imsCall) bool {
 	manager.mu.Lock()
+	if call.mediaAttached {
+		manager.mu.Unlock()
+		return true
+	}
 	imsCallID := manager.imsCallID
 	manager.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -328,6 +336,10 @@ func (manager *Manager) attachMedia(call *imsCall) bool {
 	}
 	call.bridge.AttachMedia(media)
 	call.bridge.Start(context.Background())
+	manager.mu.Lock()
+	call.mediaAttached = true
+	manager.mu.Unlock()
+	manager.logger.Info("MediaBridge 已挂接 IMS 通话媒体")
 	return true
 }
 
@@ -357,9 +369,27 @@ func (manager *Manager) HandleIncomingCall(ctx context.Context, incoming ims.Rec
 
 // runIncoming 来电流程：等软电话上线 → INVITE → 接听 → 起桥。
 func (manager *Manager) runIncoming(ctx context.Context, imsCallID, sipCallID string) {
-	// 等待软电话在线（最多 30 秒）。
+	// 兜底：任何提前返回都必须复位桥接状态，否则会遗留 state!=idle 且
+	// currentCall==nil 的卡死状态（monitorLoop 会永久跳过），此后所有外呼都会
+	// 被判忙拒绝，且重启软电话也无法恢复，只能重启服务。
+	defer func() {
+		manager.mu.Lock()
+		stale := manager.state == stateRinging &&
+			manager.sipCallID == sipCallID &&
+			manager.currentCall == nil
+		manager.mu.Unlock()
+		if !stale {
+			return
+		}
+		manager.logger.Warn("来电流程提前结束，复位桥接状态并挂断 IMS 侧")
+		manager.endCall(0, "", false, true)
+	}()
+
+	// 等待软电话在线（最多 30 秒）。调用方传入的 ctx 只是 IMS 来电回调的短时
+	// 上下文（10 秒有效期），其到期不代表来电结束，因此这里自行计时。
+	deadline := time.Now().Add(30 * time.Second)
 	var user *sipgw.RegisteredUser
-	for attempt := 0; attempt < 150; attempt++ {
+	for attempt := 0; ; attempt++ {
 		user = manager.registrar.GetUserByDevice(manager.deviceID)
 		if user != nil {
 			break
@@ -367,8 +397,12 @@ func (manager *Manager) runIncoming(ctx context.Context, imsCallID, sipCallID st
 		if attempt == 0 {
 			manager.logger.Info("来电到达，等待软电话上线", "caller", manager.number)
 		}
+		if time.Now().After(deadline) {
+			break
+		}
 		select {
 		case <-ctx.Done():
+			manager.logger.Info("等待软电话上线期间来电流程结束")
 			return
 		case <-time.After(200 * time.Millisecond):
 		}

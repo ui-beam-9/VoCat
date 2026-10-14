@@ -485,24 +485,43 @@ func (r *Registrar) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		r.respond(tx, req, 403, "Forbidden - Not Registered")
 		return
 	}
-	r.respond(tx, req, 100, "Trying")
-
 	r.mu.RLock()
 	fn := r.onInvite
+	cancelFn := r.onCancel
 	r.mu.RUnlock()
 	if fn == nil {
 		r.respond(tx, req, 503, "Service Unavailable")
 		return
 	}
+
 	select {
 	case r.concurrencySem <- struct{}{}:
-		go func() {
-			defer func() { <-r.concurrencySem }()
-			fn(user.DeviceID, req, tx)
-		}()
 	default:
 		r.respond(tx, req, 503, "Service Unavailable")
+		return
 	}
+	defer func() { <-r.concurrencySem }()
+
+	// INVITE 服务端事务必须存活到整通呼叫结束：sipgo 在 handler 返回后一定会调用
+	// TerminateGracefully，若此时只回过 100/180 等临时响应，事务会被立即终结并从
+	// 存储中移除（日志表现为「发送 183 早期媒体失败 err=transaction terminated」，
+	// 且软电话的 ACK 变成 ack missed、CANCEL 无法按 RFC 匹配）。这里同步调用
+	// handler（sipgo 每条报文独立 goroutine，阻塞是安全的），让事务一直保留。
+	deviceID := user.DeviceID
+	if stx, ok := tx.(*sip.ServerTx); ok {
+		// 匹配到 INVITE 事务的 CANCEL 由 sipgo 自行回 200 OK + 487，不再走
+		// handleCancel，因此必须通过 OnCancel 回调转发清理逻辑；回调在 FSM 内部
+		// 持锁执行，必须异步派发，否则回调里调用 tx.Respond 会与 fsmMu 自死锁。
+		stx.OnCancel(func(cancelReq *sip.Request) {
+			if cancelFn == nil {
+				return
+			}
+			go cancelFn(deviceID, cancelReq, tx)
+		})
+	}
+
+	r.respond(tx, req, 100, "Trying")
+	fn(deviceID, req, tx)
 }
 
 func (r *Registrar) handleAck(req *sip.Request, tx sip.ServerTransaction) {

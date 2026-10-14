@@ -309,6 +309,51 @@ func TestIncomingBusy(t *testing.T) {
 	}
 }
 
+// TestIncomingAbortResetsState 来电流程提前结束（等待软电话期间上下文结束）必须复位状态，
+// 否则会遗留 state!=idle 且 currentCall==nil 的卡死状态：monitorLoop 会永久跳过，
+// 之后所有外呼都会被判忙拒绝，且只有重启服务才能恢复。
+func TestIncomingAbortResetsState(t *testing.T) {
+	ctrl := &fakeController{dialErr: errors.New("IMS 未注册")}
+	manager := newTestManager(ctrl)
+	defer manager.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	manager.HandleIncomingCall(ctx, ims.ReceivedCall{
+		DeviceID: "dev-1",
+		CallID:   "ims-in-abort",
+		Caller:   "+8613800138000",
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		manager.mu.Lock()
+		st := manager.state
+		manager.mu.Unlock()
+		if st == stateIdle || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	manager.mu.Lock()
+	st := manager.state
+	manager.mu.Unlock()
+	if st != stateIdle {
+		t.Fatal("来电流程提前结束后状态应复位为空闲")
+	}
+	if ctrl.hangupCount() != 1 {
+		t.Fatalf("应挂断 IMS 侧来电 1 次，得到 %d", ctrl.hangupCount())
+	}
+
+	// 复位后必须能正常发起外呼（不应再被判忙）。
+	tx := &fakeServerTx{}
+	manager.HandleOutboundInvite("dev-1", newInvite("10086", "call-after-abort"), tx)
+	if code := tx.lastCode(); code != 503 {
+		t.Fatalf("复位后外呼不应被判忙，期望 503（拨号失败），得到 %d", code)
+	}
+}
+
 // TestMapTermination 终结码映射。
 func TestMapTermination(t *testing.T) {
 	cases := map[int]int{
