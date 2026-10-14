@@ -22,6 +22,7 @@ import (
 	"golang.org/x/term"
 
 	"vocat/internal/auth"
+	"vocat/internal/buildinfo"
 	"vocat/internal/config"
 	"vocat/internal/developer"
 	"vocat/internal/device"
@@ -475,6 +476,9 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	} else {
 		logger.Info("developer mode is off; plugin system disabled")
 	}
+
+	// 启动即打印构建版本，便于确认容器内实际部署的是哪一次构建。
+	logger.Info("VoCat 服务启动", "version", buildinfo.Build())
 
 	authService, err := auth.New(database, auth.Options{
 		SessionTTL: cfg.SessionTTL,

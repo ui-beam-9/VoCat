@@ -277,6 +277,7 @@ func (manager *Manager) routeInvite(deviceID string, req *sip.Request, tx sip.Se
 	item := manager.bridges[deviceID]
 	manager.mu.Unlock()
 	if item == nil {
+		manager.logger.Warn("外呼 INVITE 无法路由：该设备没有语音桥，回 480", "device_id", deviceID)
 		_ = tx.Respond(sip.NewResponseFromRequest(req, 480, "Temporarily Unavailable", nil))
 		return
 	}

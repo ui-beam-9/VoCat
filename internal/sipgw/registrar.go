@@ -102,7 +102,7 @@ func (r *Registrar) Start(ctx context.Context) error {
 	}
 	r.ctx, r.cancel = context.WithCancel(ctx)
 
-	srv, err := sipgo.NewServer(r.ua)
+	srv, err := sipgo.NewServer(r.ua, sipgo.WithServerLogger(r.logger))
 	if err != nil {
 		return fmt.Errorf("创建 SIP Server 失败: %w", err)
 	}
@@ -150,6 +150,7 @@ func (r *Registrar) Start(ctx context.Context) error {
 		sipgo.WithClientHostname(clientHost),
 		sipgo.WithClientPort(port),
 		sipgo.WithClientNAT(),
+		sipgo.WithClientLogger(r.logger),
 	)
 	if err != nil {
 		return fmt.Errorf("创建 SIP Client 失败: %w", err)
@@ -474,14 +475,33 @@ func (r *Registrar) cleanup() {
 // --- 呼叫信令回调路由 ---
 
 func (r *Registrar) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
+	// SIP 层入口日志：判定软电话的外呼 INVITE 是否真的到达 VoCat。
+	callID := ""
+	if header := req.GetHeader("Call-ID"); header != nil {
+		callID = header.Value()
+	}
+	fromUser, toUser := "", ""
+	if fromHeader := req.From(); fromHeader != nil {
+		fromUser = fromHeader.Address.User
+	}
+	if toHeader := req.To(); toHeader != nil {
+		toUser = toHeader.Address.User
+	}
+	r.logger.Info("收到软电话 SIP INVITE",
+		"method", fmt.Sprint(req.Method), "call_id", callID,
+		"from", fromUser, "to", toUser, "source", fmt.Sprint(req.Source()))
+
 	from := req.From()
 	if from == nil {
+		r.logger.Warn("软电话 INVITE 被拒：缺少 From 头，回 400")
 		r.respond(tx, req, 400, "Bad Request - Missing From")
 		return
 	}
 	username := from.Address.User
 	user := r.GetUserByUsername(username)
 	if user == nil {
+		// 软电话确实发出了外呼 INVITE，但该用户名不在注册表中（未注册或注册已过期）。
+		r.logger.Warn("软电话 INVITE 被拒：该用户未注册，回 403", "username", username)
 		r.respond(tx, req, 403, "Forbidden - Not Registered")
 		return
 	}
@@ -490,6 +510,7 @@ func (r *Registrar) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 	cancelFn := r.onCancel
 	r.mu.RUnlock()
 	if fn == nil {
+		r.logger.Error("软电话 INVITE 被拒：网关未注册呼叫处理器，回 503", "username", username)
 		r.respond(tx, req, 503, "Service Unavailable")
 		return
 	}
@@ -497,6 +518,7 @@ func (r *Registrar) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 	select {
 	case r.concurrencySem <- struct{}{}:
 	default:
+		r.logger.Warn("软电话 INVITE 被拒：并发槽已满，回 503", "username", username)
 		r.respond(tx, req, 503, "Service Unavailable")
 		return
 	}
@@ -520,6 +542,12 @@ func (r *Registrar) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		})
 	}
 
+	// 入口日志：用于区分「软电话 INVITE 已到达 VoCat 并被受理」与「从未到达」。
+	callee := ""
+	if to := req.To(); to != nil {
+		callee = to.Address.User
+	}
+	r.logger.Info("受理软电话外呼 INVITE", "username", username, "device", deviceID, "callee", callee)
 	r.respond(tx, req, 100, "Trying")
 	fn(deviceID, req, tx)
 }
@@ -584,9 +612,15 @@ func (r *Registrar) userFromRequest(req *sip.Request) *RegisteredUser {
 }
 
 func (r *Registrar) respond(tx sip.ServerTransaction, req *sip.Request, code int, reason string) {
-	if err := tx.Respond(sip.NewResponseFromRequest(req, code, reason, nil)); err != nil {
-		r.logger.Warn("发送 SIP 响应失败", "code", code, "reason", reason, "err", err)
+	callID := ""
+	if header := req.GetHeader("Call-ID"); header != nil {
+		callID = header.Value()
 	}
+	if err := tx.Respond(sip.NewResponseFromRequest(req, code, reason, nil)); err != nil {
+		r.logger.Warn("发送 SIP 响应失败", "code", code, "reason", reason, "call_id", callID, "err", err)
+		return
+	}
+	r.logger.Debug("已发送 SIP 响应", "code", code, "reason", reason, "call_id", callID)
 }
 
 func md5sum(value string) string {
