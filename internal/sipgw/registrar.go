@@ -39,11 +39,12 @@ type Registrar struct {
 	client *sipgo.Client
 	server *sipgo.Server
 
-	mu            sync.RWMutex
-	users         map[string]*RegisteredUser // username(小写) -> user
-	byDevice      map[string]*RegisteredUser // deviceID -> user
-	nonces        map[string]time.Time       // 认证 nonce -> 过期时间
-	onlineSignals map[string]chan struct{}
+	mu               sync.RWMutex
+	users            map[string]*RegisteredUser // username(小写) -> user
+	byDevice         map[string]*RegisteredUser // deviceID -> user
+	nonces           map[string]time.Time       // 认证 nonce -> 过期时间
+	onlineSignals    map[string]chan struct{}
+	internalSessions map[string]*internalSession // 网内通话 Call-ID -> 会话（BYE 拦截用）
 
 	onInvite  func(deviceID string, req *sip.Request, tx sip.ServerTransaction)
 	onCancel  func(deviceID string, req *sip.Request, tx sip.ServerTransaction)
@@ -69,14 +70,15 @@ func NewRegistrar(cfg Config, logger *slog.Logger) (*Registrar, error) {
 		return nil, fmt.Errorf("创建 SIP UserAgent 失败: %w", err)
 	}
 	return &Registrar{
-		cfg:            cfg,
-		logger:         logger,
-		ua:             ua,
-		users:          make(map[string]*RegisteredUser),
-		byDevice:       make(map[string]*RegisteredUser),
-		nonces:         make(map[string]time.Time),
-		onlineSignals:  make(map[string]chan struct{}),
-		concurrencySem: make(chan struct{}, 64),
+		cfg:              cfg,
+		logger:           logger,
+		ua:               ua,
+		users:            make(map[string]*RegisteredUser),
+		byDevice:         make(map[string]*RegisteredUser),
+		nonces:           make(map[string]time.Time),
+		onlineSignals:    make(map[string]chan struct{}),
+		internalSessions: make(map[string]*internalSession),
+		concurrencySem:   make(chan struct{}, 64),
 	}, nil
 }
 
@@ -598,7 +600,7 @@ func (r *Registrar) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 	callee := r.GetUserByUsername(toUser)
 	if callee != nil && callee.Username != username {
 		// 内部路由自己管理生命周期，不走外部 onInvite 回调，不占并发槽。
-		RouteInternalInvite(r.ctx, r.logger, r.client, user, callee, req, tx)
+		RouteInternalInvite(r.ctx, r.logger, r.client, r, user, callee, req, tx)
 		return
 	}
 
@@ -663,6 +665,23 @@ func (r *Registrar) handleAck(req *sip.Request, tx sip.ServerTransaction) {
 }
 
 func (r *Registrar) handleBye(req *sip.Request, tx sip.ServerTransaction) {
+	// 网内通话的 BYE 优先拦截：回 200 后转发给对侧，结束会话。
+	// SIP 中 BYE 是独立事务，不会走 RouteInternalInvite 的事件流；
+	// IMS/CS 设备桥不感知网内通话，必须在 onBye 回调之前处理。
+	if callIDHdr := req.CallID(); callIDHdr != nil {
+		r.mu.Lock()
+		sess, ok := r.internalSessions[callIDHdr.Value()]
+		if ok {
+			delete(r.internalSessions, callIDHdr.Value())
+		}
+		r.mu.Unlock()
+		if ok {
+			r.respond(tx, req, 200, "OK")
+			r.logger.Info("网内通话一方挂断，转发 BYE 给对侧", "call_id", callIDHdr.Value())
+			sess.forwardByeToPeer(req)
+			return
+		}
+	}
 	r.respond(tx, req, 200, "OK")
 	user := r.userFromRequest(req)
 	if user == nil {
@@ -674,6 +693,20 @@ func (r *Registrar) handleBye(req *sip.Request, tx sip.ServerTransaction) {
 	if fn != nil {
 		go fn(user.DeviceID, req, tx)
 	}
+}
+
+// registerInternalSession 登记一条进行中的网内通话。
+func (r *Registrar) registerInternalSession(sess *internalSession) {
+	r.mu.Lock()
+	r.internalSessions[sess.callID] = sess
+	r.mu.Unlock()
+}
+
+// unregisterInternalSession 注销网内通话（通话结束或异常兜底时调用）。
+func (r *Registrar) unregisterInternalSession(callID string) {
+	r.mu.Lock()
+	delete(r.internalSessions, callID)
+	r.mu.Unlock()
 }
 
 func (r *Registrar) handleCancel(req *sip.Request, tx sip.ServerTransaction) {
