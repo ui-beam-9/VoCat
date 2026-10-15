@@ -309,18 +309,17 @@ func TestIncomingBusy(t *testing.T) {
 	}
 }
 
-// TestIncomingAbortResetsState 来电流程提前结束（等待软电话期间上下文结束）必须复位状态，
-// 否则会遗留 state!=idle 且 currentCall==nil 的卡死状态：monitorLoop 会永久跳过，
-// 之后所有外呼都会被判忙拒绝，且只有重启服务才能恢复。
-func TestIncomingAbortResetsState(t *testing.T) {
+// TestIncomingNoSoftphoneResetsWithoutHangup 软电话未注册时等待超时只复位桥接状态：
+// 不挂断 IMS 侧（来电保持振铃，网页仍可接听）。同时必须复位状态，否则会遗留
+// state!=idle 且 currentCall==nil 的卡死状态：monitorLoop 会永久跳过，之后所有外呼
+// 都会被判忙拒绝，且只有重启服务才能恢复。
+func TestIncomingNoSoftphoneResetsWithoutHangup(t *testing.T) {
 	ctrl := &fakeController{dialErr: errors.New("IMS 未注册")}
 	manager := newTestManager(ctrl)
+	manager.softphoneWait = 50 * time.Millisecond
 	defer manager.Stop()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	manager.HandleIncomingCall(ctx, ims.ReceivedCall{
+	manager.HandleIncomingCall(context.Background(), ims.ReceivedCall{
 		DeviceID: "dev-1",
 		CallID:   "ims-in-abort",
 		Caller:   "+8613800138000",
@@ -340,10 +339,10 @@ func TestIncomingAbortResetsState(t *testing.T) {
 	st := manager.state
 	manager.mu.Unlock()
 	if st != stateIdle {
-		t.Fatal("来电流程提前结束后状态应复位为空闲")
+		t.Fatal("等待软电话上线超时后状态应复位为空闲")
 	}
-	if ctrl.hangupCount() != 1 {
-		t.Fatalf("应挂断 IMS 侧来电 1 次，得到 %d", ctrl.hangupCount())
+	if ctrl.hangupCount() != 0 {
+		t.Fatalf("软电话未上线时不应挂断 IMS 侧，得到 %d 次", ctrl.hangupCount())
 	}
 
 	// 复位后必须能正常发起外呼（不应再被判忙）。

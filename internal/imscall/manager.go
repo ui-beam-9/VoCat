@@ -49,6 +49,9 @@ type Manager struct {
 	registrar  *sipgw.Registrar
 	logger     *slog.Logger
 
+	// softphoneWait 是来电时等待软电话上线的最长时间（测试可缩短）。
+	softphoneWait time.Duration
+
 	mu           sync.Mutex
 	state        callState
 	number       string // 对端号码
@@ -90,6 +93,7 @@ func NewManager(deviceID string, controller Controller, registrar *sipgw.Registr
 		state:         stateIdle,
 		monitorCtx:    ctx,
 		monitorCancel: cancel,
+		softphoneWait: 30 * time.Second,
 	}
 	go manager.monitorLoop()
 	return manager
@@ -344,7 +348,10 @@ func (manager *Manager) attachMedia(call *imsCall) bool {
 }
 
 // HandleIncomingCall 处理 IMS 来电（由 onIncomingCall 回调驱动）。
-func (manager *Manager) HandleIncomingCall(ctx context.Context, incoming ims.ReceivedCall) {
+//
+// ctx 参数刻意不使用：它是 IMS 来电回调的短时上下文，回调返回时会被立刻 cancel
+// （vowifi/ims/call_runtime.go 的 defer cancel()），到期并不代表来电结束。
+func (manager *Manager) HandleIncomingCall(_ context.Context, incoming ims.ReceivedCall) {
 	caller := strings.TrimSpace(incoming.Caller)
 	if caller == "" {
 		caller = "Unknown"
@@ -364,11 +371,27 @@ func (manager *Manager) HandleIncomingCall(ctx context.Context, incoming ims.Rec
 	sipCallID := manager.sipCallID
 	manager.mu.Unlock()
 
-	go manager.runIncoming(ctx, incoming.CallID, sipCallID)
+	go manager.runIncoming(incoming.CallID, sipCallID)
+}
+
+// imsCallAnsweredByOther 判断当前来电是否已被其他端（如网页）接听。
+func (manager *Manager) imsCallAnsweredByOther() bool {
+	manager.mu.Lock()
+	imsCallID := manager.imsCallID
+	manager.mu.Unlock()
+	if imsCallID == "" {
+		return false
+	}
+	calls, err := manager.controller.Calls(manager.deviceID)
+	if err != nil {
+		return false
+	}
+	current := findCall(calls, imsCallID)
+	return current != nil && current.State == "active"
 }
 
 // runIncoming 来电流程：等软电话上线 → INVITE → 接听 → 起桥。
-func (manager *Manager) runIncoming(ctx context.Context, imsCallID, sipCallID string) {
+func (manager *Manager) runIncoming(imsCallID, sipCallID string) {
 	// 兜底：任何提前返回都必须复位桥接状态，否则会遗留 state!=idle 且
 	// currentCall==nil 的卡死状态（monitorLoop 会永久跳过），此后所有外呼都会
 	// 被判忙拒绝，且重启软电话也无法恢复，只能重启服务。
@@ -381,13 +404,14 @@ func (manager *Manager) runIncoming(ctx context.Context, imsCallID, sipCallID st
 		if !stale {
 			return
 		}
-		manager.logger.Warn("来电流程提前结束，复位桥接状态并挂断 IMS 侧")
-		manager.endCall(0, "", false, true)
+		manager.logger.Warn("来电流程提前结束，复位桥接状态（保持 IMS 侧振铃供网页接听）")
+		manager.endCall(0, "", false, false)
 	}()
 
-	// 等待软电话在线（最多 30 秒）。调用方传入的 ctx 只是 IMS 来电回调的短时
-	// 上下文（10 秒有效期），其到期不代表来电结束，因此这里自行计时。
-	deadline := time.Now().Add(30 * time.Second)
+	// 等待软电话在线（最多 softphoneWait，默认 30 秒）。这里刻意不使用调用方传入的
+	// ctx：它是 IMS 来电回调的短时上下文，回调返回时即被 cancel，其到期并不代表
+	// 来电结束，用它作为等待条件会让来电被瞬间放弃。
+	deadline := time.Now().Add(manager.softphoneWait)
 	var user *sipgw.RegisteredUser
 	for attempt := 0; ; attempt++ {
 		user = manager.registrar.GetUserByDevice(manager.deviceID)
@@ -400,12 +424,7 @@ func (manager *Manager) runIncoming(ctx context.Context, imsCallID, sipCallID st
 		if time.Now().After(deadline) {
 			break
 		}
-		select {
-		case <-ctx.Done():
-			manager.logger.Info("等待软电话上线期间来电流程结束")
-			return
-		case <-time.After(200 * time.Millisecond):
-		}
+		time.Sleep(200 * time.Millisecond)
 		manager.mu.Lock()
 		stillRinging := manager.state == stateRinging && manager.sipCallID == sipCallID
 		manager.mu.Unlock()
@@ -413,10 +432,16 @@ func (manager *Manager) runIncoming(ctx context.Context, imsCallID, sipCallID st
 			manager.logger.Info("等待软电话期间来电已结束")
 			return
 		}
+		// 每秒确认一次 IMS 侧状态：若网页等其他端已接听，就不再呼叫软电话。
+		if attempt%5 == 4 && manager.imsCallAnsweredByOther() {
+			manager.logger.Info("来电已被其他端接听，放弃等待软电话")
+			return
+		}
 	}
 	if user == nil {
-		manager.logger.Warn("等待 30 秒后仍无软电话上线，挂断来电")
-		manager.endCall(0, "", false, true)
+		manager.logger.Warn("等待软电话上线超时，放弃接管来电（保持 IMS 侧振铃）",
+			"wait", manager.softphoneWait)
+		manager.endCall(0, "", false, false)
 		return
 	}
 	if latest := manager.registrar.GetUserByDevice(manager.deviceID); latest != nil {
