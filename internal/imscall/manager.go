@@ -449,7 +449,10 @@ func (manager *Manager) runIncoming(ctx context.Context, imsCallID, sipCallID st
 	}
 	sdpBody := cscall.BuildSDP(localIP, bridge.LocalPort(), "VoCat IMS Call")
 
-	from := &sip.Uri{User: caller, Host: "imscall.vocat"}
+	// From 头用可路由的本机 IP 作为 host，而不是占位域名：软电话会把来电的远端 URI
+	// 存进通话记录，回拨时若 host 是不可解析的域名（原为 imscall.vocat），软电话会在
+	// 本地 DNS 解析失败并直接报错，INVITE 根本不会发送到 VoCat。
+	from := &sip.Uri{User: caller, Host: localIP}
 	to := &sip.Uri{User: user.Username, Host: localIP}
 	contact := &sip.Uri{User: caller, Host: localIP}
 
