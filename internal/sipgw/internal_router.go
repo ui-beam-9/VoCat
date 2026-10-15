@@ -39,9 +39,10 @@ func RouteInternalInvite(
 		Port:   calleeUser.ContactAddr.Port,
 	})
 	forward.SetDestination(calleeUser.ContactAddr.String())
-	if calleeUser.Transport != "" {
-		forward.SetTransport(calleeUser.Transport)
-	}
+	// 内部路由强制用 TCP：sipgo UDP MTU 阈值是 1300 字节（1500-200），
+	// Android Linphone 带完整 SDP 的 INVITE 轻松超过。
+	// 5060 端口通常同时监听 UDP 和 TCP。
+	forward.SetTransport("TCP")
 	// 只复制必要头：Via 和 Max-Forwards 让 sipgo 自动生成（避免旧 Via 链膨胀），
 	// Route/Record-Route/Service-Route 等运营商头必须丢掉（内部网内路由不走运营商路径）。
 	sip.CopyHeaders("From", req, forward)

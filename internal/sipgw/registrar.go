@@ -121,7 +121,7 @@ func (r *Registrar) ForwardIncomingSMS(ctx context.Context, fromNumber, text str
 
 	sent := 0
 	for _, user := range targets {
-		if err := r.sendQuickMessage(ctx2, user, "sip:"+fromNumber+"@vowifi", text); err == nil {
+		if err := r.sendQuickMessage(ctx2, user, fromNumber, text); err == nil {
 			sent++
 		}
 	}
@@ -130,25 +130,30 @@ func (r *Registrar) ForwardIncomingSMS(ctx context.Context, fromNumber, text str
 }
 
 // sendQuickMessage 向单个软电话发一条轻量 MESSAGE（不关心响应）。
-func (r *Registrar) sendQuickMessage(ctx context.Context, target *RegisteredUser, fromUri, text string) error {
+func (r *Registrar) sendQuickMessage(ctx context.Context, target *RegisteredUser, fromNumber, text string) error {
+	// toHost：VoCat SIP 监听地址，用软电话 Contact 所在 IP（最保守）。
+	toHost := target.ContactAddr.IP.String()
+
 	fwd := sip.NewRequest(sip.MESSAGE, sip.Uri{
 		Scheme: "sip",
 		User:   target.Username,
-		Host:   target.ContactAddr.IP.String(),
+		Host:   toHost,
 		Port:   target.ContactAddr.Port,
 	})
 	fwd.SetDestination(target.ContactAddr.String())
+	// MESSAGE 通常较小用 UDP；如果 MTU 瓶颈再改 TCP。
 	if target.Transport != "" {
 		fwd.SetTransport(target.Transport)
 	}
+	// From：实际发件号码。Linphone 会把它作为消息来源显示。
 	from := &sip.FromHeader{
-		Address: sip.Uri{Scheme: "sip", Host: fromUri},
+		Address: sip.Uri{Scheme: "sip", User: fromNumber, Host: "vowifi"},
 	}
 	from.Params.Add("tag", sip.GenerateTagN(8))
 	fwd.AppendHeader(from)
 
 	to := &sip.ToHeader{
-		Address: sip.Uri{Scheme: "sip", User: target.Username, Host: r.cfg.ExternalIP},
+		Address: sip.Uri{Scheme: "sip", User: target.Username, Host: toHost},
 	}
 	fwd.AppendHeader(to)
 
