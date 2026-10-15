@@ -547,6 +547,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	defer cancelPolling()
 
 	var onIncomingCall func(context.Context, ims.ReceivedCall) error
+	var voiceGateway *voicegateway.Manager
 
 	vowifiManager, err := configureVoWiFiRuntime(
 		deviceStartupContext,
@@ -560,12 +561,20 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 			}
 			return nil
 		},
+		// 懒转发：voiceGateway 在 configureVoWiFiRuntime 返回后才会创建，
+		// 但 OnSMS 真正被调用时它肯定已经有值。
+		func(ctx context.Context, fromNumber, text string) int {
+			if voiceGateway == nil {
+				return 0
+			}
+			return voiceGateway.ForwardIncomingSMS(ctx, fromNumber, text)
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("configure VoWiFi runtime: %w", err)
 	}
 	// CS 域语音网关（SIP/软电话桥接）：独立于 VoWiFi 链路，按已保存配置按需启动。
-	voiceGateway, err := voicegateway.New(voicegateway.Options{
+	voiceGateway, err = voicegateway.New(voicegateway.Options{
 		Devices: deviceManager,
 		Store:   database,
 		VoWiFi:  vowifiManager,
@@ -926,6 +935,7 @@ func configureVoWiFiRuntime(
 	deviceManager *device.Manager,
 	cardReaders *pcsc.Service,
 	onIncomingCall func(context.Context, ims.ReceivedCall) error,
+	onIncomingSMSNotify func(ctx context.Context, fromNumber, text string) int,
 ) (*vowifiruntime.Manager, error) {
 	mapper := integration.ATMapper{
 		Store:   database,
@@ -981,7 +991,7 @@ func configureVoWiFiRuntime(
 			} else if deviceConfig.DeviceType == store.DeviceTypeWiFi410 {
 				adapter = nativeQMIAdapter
 			}
-			return newVoWiFiOrchestrator(factoryContext, deviceConfig, database, adapter, logger, onIncomingCall)
+			return newVoWiFiOrchestrator(factoryContext, deviceConfig, database, adapter, logger, onIncomingCall, onIncomingSMSNotify)
 		},
 	})
 
@@ -1176,6 +1186,7 @@ func newVoWiFiOrchestrator(
 	adapter vowifiDeviceAdapter,
 	logger *slog.Logger,
 	onIncomingCall func(context.Context, ims.ReceivedCall) error,
+	onIncomingSMSNotify func(ctx context.Context, fromNumber, text string) int,
 ) (*vowifi.Orchestrator, error) {
 	// The ePDG tunnel is an IMS service: request the dedicated IMS APN and never
 	// the cellular data APN cached on the device or card policy.
@@ -1235,6 +1246,13 @@ func newVoWiFiOrchestrator(
 				Read:       false,
 				Extra:      extra,
 			})
+			// 软电话（Linphone）不主动拉取 VoCat 已收的短信，这里把 IMS 收到的短信
+			// 立即转发到当前在线的所有软电话。转发不影响 DB 保存。
+			if onIncomingSMSNotify != nil {
+				if n := onIncomingSMSNotify(ctx, message.From, message.Text); n == 0 {
+					logger.Debug("IMS 短信已尝试转发软电话（无在线软电话）", "peer", message.From)
+				}
+			}
 			return saveErr
 		},
 		OnSMSStatus: func(ctx context.Context, report ims.ReceivedSMSStatus) error {

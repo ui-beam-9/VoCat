@@ -96,6 +96,79 @@ func (r *Registrar) CountRegistered() int {
 	return len(r.byDevice)
 }
 
+// ForwardIncomingSMS 把收到的 IMS/CS 短信转发给当前所有在线的软电话。
+// 转发用 SIP MESSAGE，From 头设为实际发件号码（sip:<from>@vowifi），
+// Body 是短信文本。Linphone 收到后会在自己的聊天界面显示。
+// 这是尽力而为：软电话可能全部离线，消息自然丢弃。
+func (r *Registrar) ForwardIncomingSMS(ctx context.Context, fromNumber, text string) int {
+	r.mu.RLock()
+	targets := make([]*RegisteredUser, 0, len(r.users))
+	for _, u := range r.users {
+		if u == nil || u.ContactAddr == nil || time.Now().After(u.Expires) {
+			continue
+		}
+		targets = append(targets, u)
+	}
+	r.mu.RUnlock()
+
+	if len(targets) == 0 {
+		r.logger.Debug("无在线软电话，IMS 短信不转发")
+		return 0
+	}
+
+	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	sent := 0
+	for _, user := range targets {
+		if err := r.sendQuickMessage(ctx2, user, "sip:"+fromNumber+"@vowifi", text); err == nil {
+			sent++
+		}
+	}
+	r.logger.Info("IMS 短信已转发软电话", "from", fromNumber, "recipients", sent, "total", len(targets))
+	return sent
+}
+
+// sendQuickMessage 向单个软电话发一条轻量 MESSAGE（不关心响应）。
+func (r *Registrar) sendQuickMessage(ctx context.Context, target *RegisteredUser, fromUri, text string) error {
+	fwd := sip.NewRequest(sip.MESSAGE, sip.Uri{
+		Scheme: "sip",
+		User:   target.Username,
+		Host:   target.ContactAddr.IP.String(),
+		Port:   target.ContactAddr.Port,
+	})
+	fwd.SetDestination(target.ContactAddr.String())
+	if target.Transport != "" {
+		fwd.SetTransport(target.Transport)
+	}
+	from := &sip.FromHeader{
+		Address: sip.Uri{Scheme: "sip", Host: fromUri},
+	}
+	from.Params.Add("tag", sip.GenerateTagN(8))
+	fwd.AppendHeader(from)
+
+	to := &sip.ToHeader{
+		Address: sip.Uri{Scheme: "sip", User: target.Username, Host: r.cfg.ExternalIP},
+	}
+	fwd.AppendHeader(to)
+
+	callID := sip.CallIDHeader(fmt.Sprintf("ims-sms-%s-%s", sip.GenerateBranch(), target.Username))
+	fwd.AppendHeader(&callID)
+
+	cseq := sip.CSeqHeader{SeqNo: 1, MethodName: sip.MESSAGE}
+	fwd.AppendHeader(&cseq)
+
+	contentType := sip.NewHeader("Content-Type", "text/plain;charset=utf-8")
+	fwd.AppendHeader(contentType)
+
+	maxfwd := sip.MaxForwardsHeader(70)
+	fwd.AppendHeader(&maxfwd)
+
+	fwd.SetBody([]byte(text))
+
+	return r.client.WriteRequest(fwd, sipgo.ClientRequestBuild)
+}
+
 // Start 启动注册服务（UDP + TCP 同时监听）。
 func (r *Registrar) Start(ctx context.Context) error {
 	if ctx == nil {
@@ -689,13 +762,12 @@ func (r *Registrar) forwardMessageToContact(req *sip.Request, tx sip.ServerTrans
 	if target.Transport != "" {
 		forward.SetTransport(target.Transport)
 	}
-	sip.CopyHeaders("Via", req, forward)
+	// Via/Max-Forwards 让 sipgo 自动生成；Route/Record-Route 丢掉（内部网内不走运营商）。
 	sip.CopyHeaders("From", req, forward)
 	sip.CopyHeaders("To", req, forward)
 	sip.CopyHeaders("Call-ID", req, forward)
 	sip.CopyHeaders("CSeq", req, forward)
 	sip.CopyHeaders("Content-Type", req, forward)
-	sip.CopyHeaders("Max-Forwards", req, forward)
 	forward.SetBody(req.Body())
 
 	ctx, cancel := context.WithTimeout(r.ctx, 10*time.Second)

@@ -42,15 +42,20 @@ func RouteInternalInvite(
 	if calleeUser.Transport != "" {
 		forward.SetTransport(calleeUser.Transport)
 	}
-	sip.CopyHeaders("Via", req, forward)
+	// 只复制必要头：Via 和 Max-Forwards 让 sipgo 自动生成（避免旧 Via 链膨胀），
+	// Route/Record-Route/Service-Route 等运营商头必须丢掉（内部网内路由不走运营商路径）。
 	sip.CopyHeaders("From", req, forward)
 	sip.CopyHeaders("To", req, forward)
 	sip.CopyHeaders("Call-ID", req, forward)
 	sip.CopyHeaders("CSeq", req, forward)
 	sip.CopyHeaders("Contact", req, forward)
 	sip.CopyHeaders("Content-Type", req, forward)
-	sip.CopyHeaders("Max-Forwards", req, forward)
 	forward.SetBody(req.Body())
+
+	// MTU 调试：日志记录构造出的 INVITE 包大小。
+	// sipgo UDP 默认 MTU 是 64KB（uint16 max），实际以太网通常 1500。
+	logger.Info("网内 INVITE 构造完成", "call_id", callID, "packet_bytes", len(forward.String()),
+		"body_bytes", len(req.Body()), "transport", calleeUser.Transport)
 
 	fwdCtx, fwdCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer fwdCancel()

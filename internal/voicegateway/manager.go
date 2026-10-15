@@ -436,6 +436,18 @@ func (manager *Manager) HandleIncomingCall(ctx context.Context, call ims.Receive
 
 // --- 配置读写 ---
 
+// ForwardIncomingSMS 把 IMS/CS 收到的短信转发给当前在线的所有软电话。
+// 实际委托给 Registrar。
+func (manager *Manager) ForwardIncomingSMS(ctx context.Context, fromNumber, text string) int {
+	manager.mu.Lock()
+	r := manager.registrar
+	manager.mu.Unlock()
+	if r == nil {
+		return 0
+	}
+	return r.ForwardIncomingSMS(ctx, fromNumber, text)
+}
+
 // Stored 读取已保存的配置。第二个返回值为 false 表示尚未保存过。
 func (manager *Manager) Stored(ctx context.Context) (sipgw.Config, bool, error) {
 	setting, err := manager.store.AppSetting(ctx, SettingKey)
