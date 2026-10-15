@@ -68,7 +68,7 @@ const (
 func DefaultConfig() Config {
 	return Config{
 		Listen:     DefaultListen,
-		Transport:  "udp",
+		Transport:  "auto",
 		Realm:      DefaultRealm,
 		RTPPortMin: DefaultRTPPortMin,
 		RTPPortMax: DefaultRTPPortMax,
@@ -82,8 +82,12 @@ func (config Config) Normalize() Config {
 	}
 	config.Listen = strings.TrimSpace(config.Listen)
 	config.Transport = strings.ToLower(strings.TrimSpace(config.Transport))
-	if config.Transport != "tcp" {
-		config.Transport = "udp"
+	switch config.Transport {
+	case "udp", "tcp":
+		// 保持用户显式选择
+	default:
+		// 空/未知值 → 自动：UDP + TCP 同时监听，按客户端注册的传输方式自适应
+		config.Transport = "auto"
 	}
 	config.Realm = strings.TrimSpace(config.Realm)
 	if config.Realm == "" {

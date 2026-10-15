@@ -19,8 +19,8 @@ func TestConfigNormalize(t *testing.T) {
 	if cfg.Realm != DefaultRealm {
 		t.Fatalf("Realm = %q, 期望默认 %q", cfg.Realm, DefaultRealm)
 	}
-	if cfg.Transport != "udp" {
-		t.Fatalf("Transport = %q, 期望 udp", cfg.Transport)
+	if cfg.Transport != "auto" {
+		t.Fatalf("Transport = %q, 期望 auto", cfg.Transport)
 	}
 	if len(cfg.Users) != 2 {
 		t.Fatalf("有效用户数 = %d, 期望 2", len(cfg.Users))

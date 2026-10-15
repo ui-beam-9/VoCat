@@ -243,16 +243,19 @@ func (r *Registrar) Start(ctx context.Context) error {
 	addr := r.cfg.Listen
 	r.logger.Info("SIP 网关启动", "listen", addr, "realm", r.cfg.Realm, "users", len(r.cfg.Users))
 
-	go func() {
-		if err := srv.ListenAndServe(r.ctx, "udp", addr); err != nil && r.ctx.Err() == nil {
-			r.logger.Error("SIP UDP 监听失败", "err", err)
-		}
-	}()
-	go func() {
-		if err := srv.ListenAndServe(r.ctx, "tcp", addr); err != nil && r.ctx.Err() == nil {
-			r.logger.Error("SIP TCP 监听失败", "err", err)
-		}
-	}()
+	// auto：UDP + TCP 同时监听，按客户端注册的传输方式自适应；
+	// udp/tcp：只监听用户指定的传输方式。
+	networks := []string{"udp", "tcp"}
+	if r.cfg.Transport == "udp" || r.cfg.Transport == "tcp" {
+		networks = []string{r.cfg.Transport}
+	}
+	for _, network := range networks {
+		go func(n string) {
+			if err := srv.ListenAndServe(r.ctx, n, addr); err != nil && r.ctx.Err() == nil {
+				r.logger.Error("SIP 监听失败", "transport", n, "err", err)
+			}
+		}(network)
+	}
 	go r.cleanupLoop()
 
 	return nil

@@ -81,11 +81,6 @@ interface VoiceGatewayForm {
   users: VoiceGatewayUser[];
 }
 
-const TRANSPORT_OPTIONS: SelectOption[] = [
-  { value: "udp", label: "UDP" },
-  { value: "tcp", label: "TCP" },
-];
-
 const LABEL_CLASS = "text-xs font-bold text-gray-500 uppercase tracking-wider";
 
 const EMPTY_STATUS: VoiceGatewayStatus = {
@@ -120,7 +115,7 @@ export function VoiceGatewayCard() {
   const [form, setForm] = useState<VoiceGatewayForm>(() => configToForm({
     enabled: false,
     listen: "0.0.0.0:5060",
-    transport: "udp",
+    transport: "auto",
     realm: "vocat.local",
     externalIp: "",
     backend: "auto",
@@ -219,6 +214,12 @@ export function VoiceGatewayCard() {
     { value: "cs", label: t("电路域 (CS)") },
   ];
 
+  const transportOptions: SelectOption[] = [
+    { value: "auto", label: t("自动（UDP + TCP）") },
+    { value: "udp", label: "UDP" },
+    { value: "tcp", label: "TCP" },
+  ];
+
   return (
     <div className="ui-card group relative overflow-hidden p-8 lg:col-span-2">
       <CardDecor />
@@ -267,7 +268,7 @@ export function VoiceGatewayCard() {
               <Input value={form.listen} onChange={(e) => patch({ listen: e.target.value })} placeholder="0.0.0.0:5060" className="font-mono" />
             </Field>
             <Field label={t("传输协议")}>
-              <Select value={form.transport} onChange={(transport) => patch({ transport })} options={TRANSPORT_OPTIONS} />
+              <Select value={form.transport} onChange={(transport) => patch({ transport })} options={transportOptions} />
             </Field>
             <Field label={t("桥接后端")} hint={t("自动模式优先使用 VoWiFi，不可用时回退电路域（需为设备配置声卡）")}>
               <Select value={form.backend} onChange={(backend) => patch({ backend })} options={backendOptions} />

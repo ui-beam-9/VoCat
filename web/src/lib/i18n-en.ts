@@ -1495,6 +1495,7 @@ export const EN_DICT: Record<string, string> = {
   "启用语音网关": "Enable the voice gateway",
   "SIP 监听地址": "SIP listen address",
   "传输协议": "Transport",
+  "自动（UDP + TCP）": "Auto (UDP + TCP)",
   "认证域": "Realm",
   "对外 IP": "External IP",
   "对外 IP 留空表示自动探测": "Leave blank to auto-detect the external IP",
