@@ -180,6 +180,9 @@ func (f *fakeVoWiFi) HangupCall(context.Context, string, string) error { return 
 func (f *fakeVoWiFi) CallMedia(context.Context, string, string) (vowifi.CallMedia, error) {
 	return nil, errors.New("未实现")
 }
+func (f *fakeVoWiFi) SendSMS(context.Context, string, vowifi.SMSSubmitRequest) (vowifi.SMSSubmitResult, error) {
+	return vowifi.SMSSubmitResult{}, errors.New("未实现")
+}
 
 // TestResolveBackend 覆盖 auto/ims/cs 三种配置下的后端选择。
 // 关键点：后端选择只看「系统有没有 VoWiFi 能力」（vowifi 是否注入），

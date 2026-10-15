@@ -43,13 +43,14 @@ type Store interface {
 	UpsertAppSetting(ctx context.Context, value store.AppSetting) error
 }
 
-// VoWiFi 是本包需要的设备级 IMS 呼叫控制与媒体能力（由 vowifi runtime Manager 实现）。
+// VoWiFi 是本包需要的设备级 IMS 呼叫控制、媒体与短信能力（由 vowifi runtime Manager 实现）。
 type VoWiFi interface {
 	Calls(string) ([]vowifi.Call, error)
 	DialCall(context.Context, string, string) (vowifi.Call, error)
 	AnswerCall(context.Context, string, string) (vowifi.Call, error)
 	HangupCall(context.Context, string, string) error
 	CallMedia(context.Context, string, string) (vowifi.CallMedia, error)
+	SendSMS(context.Context, string, vowifi.SMSSubmitRequest) (vowifi.SMSSubmitResult, error)
 }
 
 // Options 构造协调器所需依赖。
@@ -169,6 +170,7 @@ func (manager *Manager) applyLocked(ctx context.Context, incoming sipgw.Config) 
 	registrar.SetOnBye(manager.routeBye)
 	registrar.SetOnAck(func(string, *sip.Request, sip.ServerTransaction) {})
 	registrar.SetOnPrack(func(string, *sip.Request, sip.ServerTransaction) {})
+	registrar.SetOnMessage(manager.routeMessage)
 
 	if err := registrar.Start(rootCtx); err != nil {
 		manager.lastError = err.Error()
@@ -324,6 +326,92 @@ func (manager *Manager) routeBye(deviceID string, req *sip.Request, _ sip.Server
 		return
 	}
 	item.handler.HandleClientBye(req.CallID().Value())
+}
+
+// routeMessage 处理被叫非本地注册用户的 MESSAGE：如果被叫是手机号，走 IMS/CS 发短信。
+func (manager *Manager) routeMessage(deviceID string, req *sip.Request, tx sip.ServerTransaction) {
+	to := req.To()
+	if to == nil {
+		manager.respondSIP(tx, req, 400, "Bad Request - Missing To")
+		return
+	}
+	callee := strings.TrimSpace(to.Address.User)
+
+	// 允许 tel: 形式带进来的前缀，去掉后再判。
+	if strings.HasPrefix(strings.ToLower(callee), "tel:") {
+		callee = callee[4:]
+	}
+
+	if !isPhoneNumber(callee) {
+		manager.logger.Info("MESSAGE 被叫非手机号，拒绝", "callee", callee)
+		manager.respondSIP(tx, req, 480, "Temporarily Unavailable - Not Phone Number")
+		return
+	}
+
+	if manager.vowifi == nil {
+		manager.logger.Warn("MESSAGE 无法发短信：未注入 VoWiFi 能力", "device_id", deviceID)
+		manager.respondSIP(tx, req, 503, "Service Unavailable - SMS Not Configured")
+		return
+	}
+
+	text := strings.TrimSpace(string(req.Body()))
+	callID := ""
+	if h := req.GetHeader("Call-ID"); h != nil {
+		callID = h.Value()
+	}
+
+	manager.logger.Info("MESSAGE 走 IMS 发短信",
+		"device_id", deviceID, "to", callee, "call_id", callID,
+		"length", len(text))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := manager.vowifi.SendSMS(ctx, deviceID, vowifi.SMSSubmitRequest{
+		Recipient: callee,
+		Text:      text,
+	})
+	if err != nil {
+		manager.logger.Warn("MESSAGE 发短信失败", "call_id", callID, "to", callee, "err", err)
+		manager.respondSIP(tx, req, 480, fmt.Sprintf("Temporarily Unavailable - %s", err.Error()))
+		return
+	}
+
+	manager.logger.Info("MESSAGE 发短信成功（IMS 已接受）",
+		"call_id", callID, "to", result.To,
+		"parts", result.PartsTotal, "encoding", result.Encoding)
+	manager.respondSIP(tx, req, 202, "Accepted - SMS Submitted")
+}
+
+// isPhoneNumber 判断字符串是否是手机号：
+//   - 允许 `+` 开头（国际格式）后跟 6-15 位数字
+//   - 或纯 7-15 位数字（本地格式）
+func isPhoneNumber(s string) bool {
+	if s == "" {
+		return false
+	}
+	start := 0
+	if s[0] == '+' {
+		if len(s) < 8 || len(s) > 16 {
+			return false
+		}
+		start = 1
+	} else {
+		if len(s) < 7 || len(s) > 15 {
+			return false
+		}
+	}
+	for i := start; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// respondSIP 安全地发送 SIP 响应，吞掉错误（MESSAGE 场景下网络层错误无关最终结果）。
+func (manager *Manager) respondSIP(tx sip.ServerTransaction, req *sip.Request, code int, reason string) {
+	_ = tx.Respond(sip.NewResponseFromRequest(req, code, reason, nil))
 }
 
 // HandleIncomingCall 把 IMS 来电转给对应设备的 IMS 桥（CS 后端设备忽略，走自身 URC）。

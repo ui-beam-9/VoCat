@@ -45,11 +45,12 @@ type Registrar struct {
 	nonces        map[string]time.Time       // 认证 nonce -> 过期时间
 	onlineSignals map[string]chan struct{}
 
-	onInvite func(deviceID string, req *sip.Request, tx sip.ServerTransaction)
-	onCancel func(deviceID string, req *sip.Request, tx sip.ServerTransaction)
-	onAck    func(deviceID string, req *sip.Request, tx sip.ServerTransaction)
-	onBye    func(deviceID string, req *sip.Request, tx sip.ServerTransaction)
-	onPrack  func(deviceID string, req *sip.Request, tx sip.ServerTransaction)
+	onInvite  func(deviceID string, req *sip.Request, tx sip.ServerTransaction)
+	onCancel  func(deviceID string, req *sip.Request, tx sip.ServerTransaction)
+	onAck     func(deviceID string, req *sip.Request, tx sip.ServerTransaction)
+	onBye     func(deviceID string, req *sip.Request, tx sip.ServerTransaction)
+	onPrack   func(deviceID string, req *sip.Request, tx sip.ServerTransaction)
+	onMessage func(deviceID string, req *sip.Request, tx sip.ServerTransaction)
 
 	concurrencySem chan struct{}
 
@@ -114,6 +115,8 @@ func (r *Registrar) Start(ctx context.Context) error {
 	srv.OnBye(r.handleBye)
 	srv.OnRequest("CANCEL", r.handleCancel)
 	srv.OnRequest("PRACK", r.handlePrack)
+	// MESSAGE：网内 SIP IM 转发（同一 VoCat 下注册的软电话互发消息）。
+	srv.OnRequest("MESSAGE", r.handleMessage)
 	// Linphone 注册后通常发送 PUBLISH 上报在线状态，直接回 200 OK。
 	srv.OnRequest("PUBLISH", func(req *sip.Request, tx sip.ServerTransaction) {
 		r.respond(tx, req, 200, "OK")
@@ -221,6 +224,12 @@ func (r *Registrar) SetOnBye(fn func(deviceID string, req *sip.Request, tx sip.S
 func (r *Registrar) SetOnPrack(fn func(deviceID string, req *sip.Request, tx sip.ServerTransaction)) {
 	r.mu.Lock()
 	r.onPrack = fn
+	r.mu.Unlock()
+}
+
+func (r *Registrar) SetOnMessage(fn func(deviceID string, req *sip.Request, tx sip.ServerTransaction)) {
+	r.mu.Lock()
+	r.onMessage = fn
 	r.mu.Unlock()
 }
 
@@ -505,6 +514,16 @@ func (r *Registrar) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		r.respond(tx, req, 403, "Forbidden - Not Registered")
 		return
 	}
+
+	// 网内路由：如果被叫也在本网关注册，直接在内部桥接两条 SIP 事务，
+	// 不走 IMS/CS 运营商通道。主叫和被叫都是本地用户时才走这条路。
+	callee := r.GetUserByUsername(toUser)
+	if callee != nil && callee.Username != username {
+		// 内部路由自己管理生命周期，不走外部 onInvite 回调，不占并发槽。
+		RouteInternalInvite(r.ctx, r.logger, r.client, user, callee, req, tx)
+		return
+	}
+
 	r.mu.RLock()
 	fn := r.onInvite
 	cancelFn := r.onCancel
@@ -543,11 +562,11 @@ func (r *Registrar) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 	}
 
 	// 入口日志：用于区分「软电话 INVITE 已到达 VoCat 并被受理」与「从未到达」。
-	callee := ""
+	calleeName := ""
 	if to := req.To(); to != nil {
-		callee = to.Address.User
+		calleeName = to.Address.User
 	}
-	r.logger.Info("受理软电话外呼 INVITE", "username", username, "device", deviceID, "callee", callee)
+	r.logger.Info("受理软电话外呼 INVITE", "username", username, "device", deviceID, "callee", calleeName)
 	r.respond(tx, req, 100, "Trying")
 	fn(deviceID, req, tx)
 }
@@ -601,6 +620,109 @@ func (r *Registrar) handlePrack(req *sip.Request, tx sip.ServerTransaction) {
 		return
 	}
 	_ = tx.Respond(sip.NewResponseFromRequest(req, 481, "Call/Transaction Does Not Exist", nil))
+}
+
+// handleMessage 处理 SIP MESSAGE 请求。
+// 路由优先级：
+// 1. 被叫是本地注册用户 → 网内转发到被叫的 Contact，透传响应（同步）。
+// 2. 被叫非本地 → 交给外部 onMessage 回调处理（例如走 IMS/CS SMS 发到手机号）。
+// 3. 没有 onMessage 回调 → 回 480 Temporarily Unavailable。
+func (r *Registrar) handleMessage(req *sip.Request, tx sip.ServerTransaction) {
+	to := req.To()
+	if to == nil {
+		r.respond(tx, req, 400, "Bad Request - Missing To")
+		return
+	}
+	from := req.From()
+	if from == nil {
+		r.respond(tx, req, 400, "Bad Request - Missing From")
+		return
+	}
+
+	// 主叫必须是本地注册用户，否则 VoCat 不应替它发 MESSAGE。
+	caller := r.GetUserByUsername(from.Address.User)
+	if caller == nil {
+		r.logger.Info("MESSAGE 主叫未注册，拒绝", "from", from.Address.User)
+		r.respond(tx, req, 403, "Forbidden - Not Registered")
+		return
+	}
+
+	callee := to.Address.User
+	target := r.GetUserByUsername(callee)
+	callID := ""
+	if h := req.GetHeader("Call-ID"); h != nil {
+		callID = h.Value()
+	}
+
+	// 分支一：被叫也在本地注册 → 网内转发。
+	if target != nil {
+		r.logger.Info("网内 MESSAGE 转发", "from", caller.Username, "to", callee, "call_id", callID, "target", target.Source)
+		r.forwardMessageToContact(req, tx, target, callID)
+		return
+	}
+
+	// 分支二：被叫非本地（手机号、外部 SIP 等）→ 交给外部回调（IMS/CS SMS）。
+	r.mu.RLock()
+	fn := r.onMessage
+	r.mu.RUnlock()
+	if fn != nil {
+		r.logger.Info("MESSAGE 转交外部回调", "from", caller.Username, "to", callee, "call_id", callID)
+		go fn(caller.DeviceID, req, tx)
+		return
+	}
+
+	// 分支三：没有 onMessage 回调，无法路由，回 480。
+	r.logger.Info("MESSAGE 被叫非本地且无外部回调，拒绝", "callee", callee)
+	r.respond(tx, req, 480, "Temporarily Unavailable - No Route")
+}
+
+// forwardMessageToContact 把 MESSAGE 转发到指定 RegisteredUser 的 Contact URI，并透传响应。
+func (r *Registrar) forwardMessageToContact(req *sip.Request, tx sip.ServerTransaction, target *RegisteredUser, callID string) {
+	callee := target.Username
+	forward := sip.NewRequest(sip.MESSAGE, sip.Uri{
+		Scheme: "sip",
+		User:   callee,
+		Host:   target.ContactAddr.IP.String(),
+		Port:   target.ContactAddr.Port,
+	})
+	forward.SetDestination(target.ContactAddr.String())
+	if target.Transport != "" {
+		forward.SetTransport(target.Transport)
+	}
+	sip.CopyHeaders("Via", req, forward)
+	sip.CopyHeaders("From", req, forward)
+	sip.CopyHeaders("To", req, forward)
+	sip.CopyHeaders("Call-ID", req, forward)
+	sip.CopyHeaders("CSeq", req, forward)
+	sip.CopyHeaders("Content-Type", req, forward)
+	sip.CopyHeaders("Max-Forwards", req, forward)
+	forward.SetBody(req.Body())
+
+	ctx, cancel := context.WithTimeout(r.ctx, 10*time.Second)
+	defer cancel()
+
+	fwdTx, err := r.client.TransactionRequest(ctx, forward)
+	if err != nil {
+		r.logger.Warn("网内 MESSAGE 转发失败", "call_id", callID, "err", err)
+		r.respond(tx, req, 500, "Internal Server Error")
+		return
+	}
+
+	for response := range fwdTx.Responses() {
+		reason := response.Reason
+		if err := tx.Respond(sip.NewResponseFromRequest(req, response.StatusCode, reason, response.Body())); err != nil {
+			r.logger.Warn("透传 MESSAGE 响应失败", "call_id", callID, "err", err)
+		}
+		return
+	}
+	r.respond(tx, req, 504, "Gateway Timeout - No Response")
+}
+
+func fromUser(req *sip.Request) string {
+	if from := req.From(); from != nil {
+		return from.Address.User
+	}
+	return ""
 }
 
 func (r *Registrar) userFromRequest(req *sip.Request) *RegisteredUser {
