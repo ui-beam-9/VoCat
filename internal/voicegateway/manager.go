@@ -242,8 +242,33 @@ func (manager *Manager) resolveBackend(deviceID string) string {
 	// auto：探测设备 IMS 会话是否就绪。
 	if _, err := manager.vowifi.Calls(deviceID); err == nil {
 		return sipgw.BackendIMS
+	} else {
+		manager.logger.Debug("auto 模式探测 IMS 未就绪，回退 CS", "device_id", deviceID, "err", err)
 	}
 	return sipgw.BackendCS
+}
+
+// handlerForCallLocked 返回该设备当前应使用的呼叫处理器。
+// auto 模式下每次呼叫都会重新探测 IMS 是否就绪：已建桥与期望后端不一致时
+// 停掉旧桥并按最新判定重建，避免「配置应用时 IMS 未就绪」导致桥永久定型为
+// CS（无声卡设备甚至无桥），网页软电话随后被 480 拒绝。调用方需持有 manager.mu。
+func (manager *Manager) handlerForCallLocked(deviceID string) (callHandler, error) {
+	desired := manager.resolveBackend(deviceID)
+	item := manager.bridges[deviceID]
+	if item != nil && item.backend == desired {
+		return item.handler, nil
+	}
+	if item != nil {
+		manager.logger.Info("设备语音桥后端切换",
+			"device_id", deviceID, "old_backend", item.backend, "new_backend", desired)
+		item.handler.Stop()
+		delete(manager.bridges, deviceID)
+	}
+	// startBridgeLocked 仅将 ctx 用于读取设备配置（CS 桥），与网关生命周期无关。
+	if err := manager.startBridgeLocked(context.Background(), deviceID); err != nil {
+		return nil, err
+	}
+	return manager.bridges[deviceID].handler, nil
 }
 
 func (manager *Manager) stopLocked() {
@@ -274,14 +299,15 @@ func (manager *Manager) Close() {
 
 func (manager *Manager) routeInvite(deviceID string, req *sip.Request, tx sip.ServerTransaction) {
 	manager.mu.Lock()
-	item := manager.bridges[deviceID]
+	handler, err := manager.handlerForCallLocked(deviceID)
 	manager.mu.Unlock()
-	if item == nil {
-		manager.logger.Warn("外呼 INVITE 无法路由：该设备没有语音桥，回 480", "device_id", deviceID)
+	if err != nil {
+		manager.logger.Warn("外呼 INVITE 无法路由：该设备没有可用语音桥，回 480",
+			"device_id", deviceID, "err", err)
 		_ = tx.Respond(sip.NewResponseFromRequest(req, 480, "Temporarily Unavailable", nil))
 		return
 	}
-	item.handler.HandleOutboundInvite(deviceID, req, tx)
+	handler.HandleOutboundInvite(deviceID, req, tx)
 }
 
 func (manager *Manager) routeCancel(deviceID string, req *sip.Request, _ sip.ServerTransaction) {
@@ -305,15 +331,20 @@ func (manager *Manager) routeBye(deviceID string, req *sip.Request, _ sip.Server
 }
 
 // HandleIncomingCall 把 IMS 来电转给对应设备的 IMS 桥（CS 后端设备忽略，走自身 URC）。
+// auto 模式下桥可能之前被定型为 CS，而来电本身说明 IMS 已就绪，这里通过
+// handlerForCallLocked 重新判定并在需要时重建 IMS 桥。
 func (manager *Manager) HandleIncomingCall(ctx context.Context, call ims.ReceivedCall) {
 	manager.mu.Lock()
-	item := manager.bridges[call.DeviceID]
+	handler, err := manager.handlerForCallLocked(call.DeviceID)
 	manager.mu.Unlock()
-	if item == nil || item.backend != sipgw.BackendIMS {
+	if err != nil {
+		manager.logger.Warn("IMS 来电无法路由：该设备没有可用语音桥",
+			"device_id", call.DeviceID, "err", err)
 		return
 	}
-	imsManager, ok := item.handler.(*imscall.Manager)
+	imsManager, ok := handler.(*imscall.Manager)
 	if !ok {
+		// 强制 CS 的设备：来电仍由 modem 自身 URC 处理，忽略。
 		return
 	}
 	imsManager.HandleIncomingCall(ctx, call)
