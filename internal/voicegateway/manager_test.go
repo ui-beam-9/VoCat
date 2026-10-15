@@ -182,6 +182,8 @@ func (f *fakeVoWiFi) CallMedia(context.Context, string, string) (vowifi.CallMedi
 }
 
 // TestResolveBackend 覆盖 auto/ims/cs 三种配置下的后端选择。
+// 关键点：后端选择只看「系统有没有 VoWiFi 能力」（vowifi 是否注入），
+// 不探测 VoWiFi 运行时连接状态（Calls 是否成功）。
 func TestResolveBackend(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -190,8 +192,8 @@ func TestResolveBackend(t *testing.T) {
 		expected string
 	}{
 		{"auto 未注入 VoWiFi 回退 CS", sipgw.BackendAuto, nil, sipgw.BackendCS},
-		{"auto IMS 会话就绪选 IMS", sipgw.BackendAuto, &fakeVoWiFi{}, sipgw.BackendIMS},
-		{"auto IMS 会话未就绪回退 CS", sipgw.BackendAuto, &fakeVoWiFi{callsErr: errors.New("未注册")}, sipgw.BackendCS},
+		{"auto 有 VoWiFi 能力选 IMS", sipgw.BackendAuto, &fakeVoWiFi{}, sipgw.BackendIMS},
+		{"auto 有 VoWiFi 能力但 Calls 失败仍选 IMS（不探测运行时状态）", sipgw.BackendAuto, &fakeVoWiFi{callsErr: errors.New("未注册")}, sipgw.BackendIMS},
 		{"强制 IMS", sipgw.BackendIMS, &fakeVoWiFi{callsErr: errors.New("未注册")}, sipgw.BackendIMS},
 		{"强制 IMS 但未注入回退 CS", sipgw.BackendIMS, nil, sipgw.BackendCS},
 		{"强制 CS", sipgw.BackendCS, &fakeVoWiFi{}, sipgw.BackendCS},
@@ -229,8 +231,8 @@ func newBridgeTestManager(backend string, vowifi VoWiFi, devices map[string]stor
 	}
 }
 
-// TestHandlerForCallAutoCreatesIMSBridgeWhenReady 验证 auto 模式且 IMS 就绪时建 IMS 桥。
-func TestHandlerForCallAutoCreatesIMSBridgeWhenReady(t *testing.T) {
+// TestHandlerForCallAutoCreatesIMSBridge 验证 auto + 有 VoWiFi 能力 → 建 IMS 桥。
+func TestHandlerForCallAutoCreatesIMSBridge(t *testing.T) {
 	manager := newBridgeTestManager(sipgw.BackendAuto, &fakeVoWiFi{}, nil)
 	t.Cleanup(manager.Close)
 
@@ -243,10 +245,10 @@ func TestHandlerForCallAutoCreatesIMSBridgeWhenReady(t *testing.T) {
 	}
 }
 
-// TestHandlerForCallAutoFallsBackCSWithSoundCard 验证 auto 模式 IMS 未就绪且配声卡时回退 CS 桥。
-func TestHandlerForCallAutoFallsBackCSWithSoundCard(t *testing.T) {
+// TestHandlerForCallForceCSWithSoundCard 验证强制 CS + 配声卡 → 建 CS 桥。
+func TestHandlerForCallForceCSWithSoundCard(t *testing.T) {
 	devices := map[string]store.Device{"dev-1": {ID: "dev-1", AudioDevice: "hw:0,0"}}
-	manager := newBridgeTestManager(sipgw.BackendAuto, &fakeVoWiFi{callsErr: errors.New("未注册")}, devices)
+	manager := newBridgeTestManager(sipgw.BackendCS, &fakeVoWiFi{}, devices)
 	t.Cleanup(manager.Close)
 
 	handler, err := manager.handlerForCallLocked("dev-1")
@@ -258,55 +260,54 @@ func TestHandlerForCallAutoFallsBackCSWithSoundCard(t *testing.T) {
 	}
 }
 
-// TestHandlerForCallAutoErrorWithoutSoundCard 验证 auto 模式 IMS 未就绪且无声卡时返回错误（对应 480）。
-func TestHandlerForCallAutoErrorWithoutSoundCard(t *testing.T) {
+// TestHandlerForCallForceCSErrorWithoutSoundCard 验证强制 CS + 无声卡 → 返回错误（480 场景）。
+func TestHandlerForCallForceCSErrorWithoutSoundCard(t *testing.T) {
 	devices := map[string]store.Device{"dev-1": {ID: "dev-1"}}
-	manager := newBridgeTestManager(sipgw.BackendAuto, &fakeVoWiFi{callsErr: errors.New("未注册")}, devices)
+	manager := newBridgeTestManager(sipgw.BackendCS, &fakeVoWiFi{}, devices)
 	t.Cleanup(manager.Close)
 
 	if _, err := manager.handlerForCallLocked("dev-1"); err == nil {
-		t.Fatal("期望无声卡时返回错误，得到 nil")
+		t.Fatal("期望强制 CS 但无声卡时返回错误，得到 nil")
 	}
 	if len(manager.bridges) != 0 {
 		t.Fatalf("期望 bridges 为空，得到 %d 个", len(manager.bridges))
 	}
 }
 
-// TestHandlerForCallAutoSwitchesBackendAtRuntime 验证 IMS 从「未就绪」恢复后，呼叫时自动把 CS 桥切换为 IMS 桥。
-func TestHandlerForCallAutoSwitchesBackendAtRuntime(t *testing.T) {
-	dynamicVoWiFi := &fakeVoWiFi{callsErr: errors.New("未注册")}
+// TestHandlerForCallBackendSwitchAtRuntime 验证运行时配置变更（IMS→CS→IMS）时桥会被正确重建。
+func TestHandlerForCallBackendSwitchAtRuntime(t *testing.T) {
 	devices := map[string]store.Device{"dev-1": {ID: "dev-1", AudioDevice: "hw:0,0"}}
-	manager := newBridgeTestManager(sipgw.BackendAuto, dynamicVoWiFi, devices)
+	manager := newBridgeTestManager(sipgw.BackendAuto, &fakeVoWiFi{}, devices) // auto = IMS
 	t.Cleanup(manager.Close)
 
 	first, err := manager.handlerForCallLocked("dev-1")
 	if err != nil {
 		t.Fatalf("首次期望成功建桥，得到 err=%v", err)
 	}
-	if _, ok := first.(*cscall.Manager); !ok {
-		t.Fatalf("首次期望 CS 桥，得到 %T", first)
+	if _, ok := first.(*imscall.Manager); !ok {
+		t.Fatalf("首次期望 IMS 桥，得到 %T", first)
 	}
 
-	// 模拟 IMS 会话恢复。
-	dynamicVoWiFi.callsErr = nil
-
+	// 用户把配置改成强制 CS。
+	manager.cfg.Backend = sipgw.BackendCS
 	second, err := manager.handlerForCallLocked("dev-1")
 	if err != nil {
-		t.Fatalf("第二次期望成功建桥，得到 err=%v", err)
+		t.Fatalf("切 CS 期望成功建桥，得到 err=%v", err)
 	}
-	if _, ok := second.(*imscall.Manager); !ok {
-		t.Fatalf("第二次期望 IMS 桥，得到 %T", second)
+	if _, ok := second.(*cscall.Manager); !ok {
+		t.Fatalf("第二次期望 CS 桥，得到 %T", second)
 	}
 	if len(manager.bridges) != 1 {
 		t.Fatalf("期望旧桥已释放只保留一个桥，得到 %d 个", len(manager.bridges))
 	}
 
-	// 后端稳定后重复呼叫应复用同一桥。
+	// 再切回 auto（= IMS），后端应再次切换。
+	manager.cfg.Backend = sipgw.BackendAuto
 	third, err := manager.handlerForCallLocked("dev-1")
 	if err != nil {
-		t.Fatalf("第三次期望成功复用桥，得到 err=%v", err)
+		t.Fatalf("切回 auto 期望成功建桥，得到 err=%v", err)
 	}
-	if third != second {
-		t.Fatalf("期望复用同一 IMS 桥实例")
+	if _, ok := third.(*imscall.Manager); !ok {
+		t.Fatalf("第三次期望 IMS 桥，得到 %T", third)
 	}
 }

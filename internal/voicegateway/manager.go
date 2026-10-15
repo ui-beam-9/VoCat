@@ -223,8 +223,13 @@ func (manager *Manager) startBridgeLocked(ctx context.Context, deviceID string) 
 	return nil
 }
 
-// resolveBackend 按配置与实际能力确定设备的桥接后端。
-// auto 模式下设备 IMS 会话就绪（Calls 探测成功）时用 IMS，否则回退 CS。
+// resolveBackend 按配置与系统能力确定设备的桥接后端。
+//
+// 后端选择只看**系统有没有 VoWiFi 能力**（manager.vowifi 是否注入），
+// 不探测 VoWiFi 运行时连接状态（Phase 在哪、Calls 是否成功）——那是 VoWiFi
+// 独立 lifecycle 的事，桥接后端只管"系统有能力就选 IMS"。VoWiFi 连不上时
+// DialCall 会在真正拨号处返回错误，由 IMS handler 回 503 并记录明确原因，
+// 而不是在这里提前 fallback CS 导致无声卡设备根本建不起桥。
 func (manager *Manager) resolveBackend(deviceID string) string {
 	configured := manager.cfg.Backend
 	if configured == sipgw.BackendCS {
@@ -236,22 +241,13 @@ func (manager *Manager) resolveBackend(deviceID string) string {
 		}
 		return sipgw.BackendCS
 	}
-	if configured == sipgw.BackendIMS {
-		return sipgw.BackendIMS
-	}
-	// auto：探测设备 IMS 会话是否就绪。
-	if _, err := manager.vowifi.Calls(deviceID); err == nil {
-		return sipgw.BackendIMS
-	} else {
-		manager.logger.Debug("auto 模式探测 IMS 未就绪，回退 CS", "device_id", deviceID, "err", err)
-	}
-	return sipgw.BackendCS
+	// IMS 或 auto：系统有 VoWiFi 能力就选 IMS。
+	return sipgw.BackendIMS
 }
 
 // handlerForCallLocked 返回该设备当前应使用的呼叫处理器。
-// auto 模式下每次呼叫都会重新探测 IMS 是否就绪：已建桥与期望后端不一致时
-// 停掉旧桥并按最新判定重建，避免「配置应用时 IMS 未就绪」导致桥永久定型为
-// CS（无声卡设备甚至无桥），网页软电话随后被 480 拒绝。调用方需持有 manager.mu。
+// 运行时若桥后端与 resolveBackend 最新判定不一致（典型场景：用户保存了新的
+// 桥接后端配置），停掉旧桥并按最新判定重建。调用方需持有 manager.mu。
 func (manager *Manager) handlerForCallLocked(deviceID string) (callHandler, error) {
 	desired := manager.resolveBackend(deviceID)
 	item := manager.bridges[deviceID]
