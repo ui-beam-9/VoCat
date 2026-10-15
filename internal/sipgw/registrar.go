@@ -46,6 +46,10 @@ type Registrar struct {
 	onlineSignals    map[string]chan struct{}
 	internalSessions map[string]*internalSession // 网内通话 Call-ID -> 会话（BYE 拦截用）
 
+	// sipHost 是 VoCat SIP 服务器对外可见的 host（IP 或域名），
+	// 用于构建 MESSAGE/INVITE 的 From 等 header，让对端正确识别来源。
+	sipHost string
+
 	onInvite  func(deviceID string, req *sip.Request, tx sip.ServerTransaction)
 	onCancel  func(deviceID string, req *sip.Request, tx sip.ServerTransaction)
 	onAck     func(deviceID string, req *sip.Request, tx sip.ServerTransaction)
@@ -147,9 +151,10 @@ func (r *Registrar) sendQuickMessage(ctx context.Context, target *RegisteredUser
 	if target.Transport != "" {
 		fwd.SetTransport(target.Transport)
 	}
-	// From：实际发件号码。Linphone 会把它作为消息来源显示。
+	// From：实际发件号码，DisplayName 让 Linphone 直接显示号码而非完整 URI。
 	from := &sip.FromHeader{
-		Address: sip.Uri{Scheme: "sip", User: fromNumber, Host: "vowifi"},
+		Address:     sip.Uri{Scheme: "sip", User: fromNumber, Host: r.sipHost},
+		DisplayName: fromNumber,
 	}
 	from.Params.Add("tag", sip.GenerateTagN(8))
 	fwd.AppendHeader(from)
@@ -227,6 +232,7 @@ func (r *Registrar) Start(ctx context.Context) error {
 	if clientHost == "" {
 		clientHost = "127.0.0.1"
 	}
+	r.sipHost = clientHost
 
 	client, err := sipgo.NewClient(
 		r.ua,
@@ -809,6 +815,12 @@ func (r *Registrar) forwardMessageToContact(req *sip.Request, tx sip.ServerTrans
 	sip.CopyHeaders("Call-ID", req, forward)
 	sip.CopyHeaders("CSeq", req, forward)
 	sip.CopyHeaders("Content-Type", req, forward)
+	// 给被叫显示主叫用户名（如 1002），而非完整 sip:1002@vocat.local
+	if fh := forward.From(); fh != nil {
+		if origFrom := req.From(); origFrom != nil {
+			fh.DisplayName = origFrom.Address.User
+		}
+	}
 	forward.SetBody(req.Body())
 
 	ctx, cancel := context.WithTimeout(r.ctx, 10*time.Second)

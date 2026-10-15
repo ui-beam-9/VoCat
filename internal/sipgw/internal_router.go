@@ -60,6 +60,10 @@ func RouteInternalInvite(
 	sip.CopyHeaders("CSeq", req, forward)
 	sip.CopyHeaders("Contact", req, forward)
 	sip.CopyHeaders("Content-Type", req, forward)
+	// 给被叫显示主叫用户名（如 1002），而非完整 sip:1002@vocat.local
+	if fh := forward.From(); fh != nil {
+		fh.DisplayName = callerUser.Username
+	}
 	forward.SetBody(req.Body())
 
 	// 调试日志：包大小 + 实际选择的传输方式。

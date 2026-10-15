@@ -276,7 +276,7 @@ export function VoiceGatewayCard() {
             <Field label={t("认证域")}>
               <Input value={form.realm} onChange={(e) => patch({ realm: e.target.value })} placeholder="vocat.local" className="font-mono" />
             </Field>
-            <Field label={t("对外 IP")} hint={t("对外 IP 留空表示自动探测")}>
+            <Field label={t("SIP 服务器地址")} hint={t("留空自动探测；用于 SIP 消息来源显示和 NAT 穿透")}>
               <Input value={form.externalIp} onChange={(e) => patch({ externalIp: e.target.value })} placeholder="1.2.3.4" className="font-mono" />
             </Field>
             <Field label={t("RTP 端口范围")} className="sm:col-span-2">
