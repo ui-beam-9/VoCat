@@ -33,6 +33,9 @@ func RouteInternalInvite(
 		"from", callerUser.Username, "to", calleeUser.Username,
 		"call_id", callID, "callee_contact", calleeUser.Source)
 
+	// 主叫侧 dialog 的 To-tag：VoCat 作为 UAS 只生成一次，180/183/200 全部共用。
+	callerTag := sip.GenerateTagN(16)
+
 	// 构造到被叫 Contact 的 INVITE。
 	forward := sip.NewRequest(sip.INVITE, sip.Uri{
 		Scheme: "sip",
@@ -58,12 +61,15 @@ func RouteInternalInvite(
 	sip.CopyHeaders("To", req, forward)
 	sip.CopyHeaders("Call-ID", req, forward)
 	sip.CopyHeaders("CSeq", req, forward)
-	sip.CopyHeaders("Contact", req, forward)
 	sip.CopyHeaders("Content-Type", req, forward)
 	// 给被叫显示主叫用户名（如 1002），而非完整 sip:1002@vocat.local
 	if fh := forward.From(); fh != nil {
 		fh.DisplayName = callerUser.Username
 	}
+	// Contact 必须指向 VoCat 自身：若照抄主叫的 Contact，被叫的 in-dialog 请求
+	// （BYE 等）会直连主叫、绕过 VoCat，挂断转发与会话拦截都会失效。
+	// 被叫视角的"对端"是主叫，所以 User 用主叫用户名。
+	forward.AppendHeader(sip.NewHeader("Contact", "<sip:"+callerUser.Username+"@"+registrar.sipHost+">"))
 	forward.SetBody(req.Body())
 
 	// 调试日志：包大小 + 实际选择的传输方式。
@@ -116,44 +122,71 @@ func RouteInternalInvite(
 				}
 				return
 			}
-			reason := resp.Reason
 			switch {
 			case resp.StatusCode >= 200 && resp.StatusCode < 300:
-				// 200 OK：被叫接听。透传回主叫，进入 ACK/BYE 阶段。
+				// 200 OK：被叫接听。
 				calleeAnswered = true
 				logger.Info("网内 INVITE 被叫接听，透传 200 给主叫", "call_id", callID)
-				callerOK := sip.NewResponseFromRequest(req, resp.StatusCode, reason, resp.Body())
-				// 复用被叫的 To tag 作为主叫侧 dialog 标识：
-				// 之后被叫挂断时，VoCat 给主叫转发 BYE 必须用同一 tag，主叫才认账。
-				if to := callerOK.To(); to != nil {
-					if calleeTo := resp.To(); calleeTo != nil {
-						if tag, ok := calleeTo.Params.Get("tag"); ok {
-							to.Params.Add("tag", tag)
-						}
-					}
+
+				// VoCat 是 B2BUA，被叫侧与主叫侧是两段独立 dialog：
+				// 被叫侧 VoCat 是 UAC，收到被叫 200 OK 必须立刻回 ACK。
+				// 否则被叫 Linphone 会持续重传 200、界面停在 connecting，
+				// 且不会启动媒体，表现为"主叫显示已接通但没声音"。
+				// 注意：2xx 的 ACK 是独立事务，不能用 callerTx.Acks() 等待主叫的 ACK
+				// （那是非 2xx 才走的通道），必须由 VoCat 立即以 UAC 身份回给被叫。
+				ack := buildAck(forward, resp)
+				// WriteRequest 不像 TransactionRequest 会自动带上事务里的目标地址，
+				// 必须显式设置 destination/transport，否则发送时报 "parse address failed"。
+				ack.SetDestination(forward.Destination())
+				if t := forward.Transport(); t != "" {
+					ack.SetTransport(t)
 				}
-				if err := callerTx.Respond(callerOK); err != nil {
-					logger.Warn("透传 200 给主叫失败", "call_id", callID, "err", err)
+				if err := client.WriteRequest(ack, sipgo.ClientRequestBuild); err != nil {
+					logger.Warn("网内 INVITE 发送被叫 ACK 失败", "call_id", callID, "err", err)
+					// 给被叫补一条 BYE 清场，并以 500 通知主叫。
+					hangup := buildBye(forward, resp)
+					hangup.SetDestination(forward.Destination())
+					_ = client.WriteRequest(hangup, sipgo.ClientRequestBuild)
+					_ = callerTx.Respond(sip.NewResponseFromRequest(req, 500, "Internal Server Error", nil))
 					calleeTx.Terminate()
 					return
 				}
-				// 等主叫 ACK；通话建立后双方的 BYE 由 registrar.handleBye 拦截转发。
-				waitAckAndBye(ctx, logger, client, registrar, callerUser, calleeUser,
-					req, forward, resp, callerOK, callerTx, calleeTx, callID)
+				logger.Info("网内 INVITE 已发送被叫 ACK", "call_id", callID)
+
+				// NewResponseFromRequest 只复制 Via/From/To/Call-ID/CSeq，不复制 Content-Type；
+				// 而 200 OK 携带 SDP，缺 Content-Type 时主叫 Linphone 不会解析远端 SDP，
+				// 表现为主叫显示"已接通"但没有声音。
+				callerOK := relayResponseToCaller(req, resp, callerTag)
+				// 主叫侧 200 OK 必须带 Contact：缺少时主叫无法确定 remote target，
+				// 其后续 ACK/BYE 无法正确路由。指向 VoCat 自身，
+				// 由 handleBye 按 Call-ID 拦截后再转发给对侧。
+				callerOK.AppendHeader(sip.NewHeader("Contact", "<sip:"+calleeUser.Username+"@"+registrar.sipHost+">"))
+				if err := callerTx.Respond(callerOK); err != nil {
+					logger.Warn("透传 200 给主叫失败", "call_id", callID, "err", err)
+					hangup := buildBye(forward, resp)
+					hangup.SetDestination(forward.Destination())
+					_ = client.WriteRequest(hangup, sipgo.ClientRequestBuild)
+					calleeTx.Terminate()
+					return
+				}
+				// 通话建立后双方的 BYE 由 registrar.handleBye 拦截转发。
+				waitForHangup(ctx, logger, registrar, callerUser, calleeUser,
+					req, forward, resp, callerOK, client, callID)
 				return
 
 			case resp.StatusCode >= 300:
 				// 3xx/4xx/5xx/6xx：被叫拒绝或失败。透传回主叫，结束。
 				calleeAnswered = true
 				logger.Info("网内 INVITE 被叫拒绝", "call_id", callID, "code", resp.StatusCode)
-				_ = callerTx.Respond(sip.NewResponseFromRequest(req, resp.StatusCode, reason, resp.Body()))
+				_ = callerTx.Respond(relayResponseToCaller(req, resp, callerTag))
 				calleeTx.Terminate()
 				return
 
 			default:
 				// 1xx（180 Ringing / 183 Session Progress）：透传回主叫。
+				// 183 可能携带早期媒体 SDP，同样必须带上 Content-Type。
 				logger.Info("网内 INVITE 透传临时响应", "call_id", callID, "code", resp.StatusCode)
-				_ = callerTx.Respond(sip.NewResponseFromRequest(req, resp.StatusCode, reason, resp.Body()))
+				_ = callerTx.Respond(relayResponseToCaller(req, resp, callerTag))
 			}
 
 		case <-cancelled:
@@ -184,68 +217,27 @@ func RouteInternalInvite(
 	}
 }
 
-// waitAckAndBye 在被叫已回 200 OK 后，处理主叫 ACK 并等待通话结束。
-// 通话建立后注册网内会话，任意一方的 BYE 由 registrar.handleBye 按 Call-ID 拦截，
-// 转发给对侧后关闭会话（sess.done）唤醒本函数返回。
-func waitAckAndBye(
+// waitForHangup 在通话建立（已给被叫回过 ACK、已给主叫回过 200）之后，等待某一方挂断。
+//
+// ACK 已由 RouteInternalInvite 立刻发给被叫，这里只负责登记网内会话并等待结束：
+// 任意一方的 BYE 由 registrar.handleBye 按 Call-ID 拦截，转发给对侧后关闭 sess.done。
+//
+// 注意：这里刻意不监听 callerTx.Done() / calleeTx.Done()。
+// sipgo 的 INVITE 服务端事务在 ACK 后约 5 秒终结，客户端事务在 200 OK 后 Timer M（32 秒）终结，
+// 若把它们当作通话结束信号，会话表会在通话进行中被提前清空，导致双方挂断都无法转发。
+func waitForHangup(
 	ctx context.Context,
 	logger *slog.Logger,
-	client *sipgo.Client,
 	registrar *Registrar,
 	callerUser *RegisteredUser,
 	calleeUser *RegisteredUser,
 	callerReq *sip.Request,
 	calleeReq *sip.Request,
-	callee200 *sip.Response,
+	calleeOK *sip.Response,
 	callerOK *sip.Response,
-	callerTx sip.ServerTransaction,
-	calleeTx sip.ClientTransaction,
+	client *sipgo.Client,
 	callID string,
 ) {
-	// 构造到被叫的 ACK（基于 200 OK 的 Contact）。
-	ack := buildAck(calleeReq, callee200)
-
-	// 等待主叫 ACK，最多 30 秒。
-	ackTimer := time.NewTimer(30 * time.Second)
-	defer ackTimer.Stop()
-
-	ackSent := false
-	for !ackSent {
-		select {
-		case ackReq, ok := <-callerTx.Acks():
-			if !ok {
-				logger.Warn("网内 INVITE 主叫 ACK 通道关闭", "call_id", callID)
-				calleeTx.Terminate()
-				return
-			}
-			// 用我们构造的 ACK 发给被叫（主叫 ACK 不直接转发，因为 Request-URI 是主叫视角的）。
-			_ = ackReq
-			if err := client.WriteRequest(ack, sipgo.ClientRequestBuild); err != nil {
-				logger.Warn("网内 INVITE 发送被叫 ACK 失败", "call_id", callID, "err", err)
-			} else {
-				logger.Info("网内 INVITE 已发送被叫 ACK", "call_id", callID)
-			}
-			ackSent = true
-
-		case <-ackTimer.C:
-			logger.Warn("网内 INVITE 等待主叫 ACK 超时", "call_id", callID)
-			calleeTx.Terminate()
-			return
-
-		case <-callerTx.Done():
-			logger.Warn("网内 INVITE 主叫侧事务提前终结，补发 ACK", "call_id", callID)
-			_ = client.WriteRequest(ack, sipgo.ClientRequestBuild)
-			calleeTx.Terminate()
-			return
-
-		case <-ctx.Done():
-			calleeTx.Terminate()
-			return
-		}
-	}
-
-	// ACK 已送达被叫，通话正式建立。注册网内会话：
-	// 任意一方挂断时 registrar.handleBye 按 Call-ID 拦截 BYE，转发给对侧。
 	sess := &internalSession{
 		callID:     callID,
 		callerUser: callerUser,
@@ -253,7 +245,7 @@ func waitAckAndBye(
 		callerReq:  callerReq,
 		callerOK:   callerOK,
 		calleeReq:  calleeReq,
-		calleeOK:   callee200,
+		calleeOK:   calleeOK,
 		client:     client,
 		logger:     logger,
 		done:       make(chan struct{}),
@@ -264,19 +256,39 @@ func waitAckAndBye(
 	logger.Info("网内通话建立，等待挂断", "call_id", callID,
 		"caller", callerUser.Username, "callee", calleeUser.Username)
 
-	// 等待结束信号：任一方 BYE（sess.done）、事务异常终结、或兜底超时。
 	select {
 	case <-sess.done:
 		logger.Info("网内通话已结束（一方挂断，BYE 已转发对侧）", "call_id", callID)
-	case <-calleeTx.Done():
-		logger.Info("网内通话被叫侧事务终结", "call_id", callID)
-	case <-callerTx.Done():
-		logger.Info("网内通话主叫侧事务终结", "call_id", callID)
 	case <-time.After(4 * time.Hour):
 		logger.Info("网内通话兜底超时结束", "call_id", callID)
 	case <-ctx.Done():
 		logger.Info("网内通话上下文取消", "call_id", callID)
 	}
+}
+
+// relayResponseToCaller 把被叫的响应透传回主叫。
+//
+// 两处必须修正：
+//  1. NewResponseFromRequest 只复制 Via/From/To/Call-ID/CSeq 与 Record-Route，
+//     不会复制 Content-Type；183/200 携带 SDP 时必须补上，否则主叫无法解析远端 SDP。
+//  2. NewResponseFromRequest 每次都会给 To 生成一个新的 tag，
+//     而 RFC 3261 要求同一 INVITE 的所有响应（180/183/200）共用同一个 tag，
+//     必须统一替换成 callerTag，否则部分 UAC 会丢弃后续响应。
+func relayResponseToCaller(req *sip.Request, resp *sip.Response, callerTag string) *sip.Response {
+	out := sip.NewResponseFromRequest(req, resp.StatusCode, resp.Reason, resp.Body())
+	sip.CopyHeaders("Content-Type", resp, out)
+	if to := out.To(); to != nil {
+		to.Params.Add("tag", callerTag)
+	}
+	return out
+}
+
+// requestTransport 返回请求实际使用的传输方式，未设置时回退 UDP。
+func requestTransport(req *sip.Request) string {
+	if t := req.Transport(); t != "" {
+		return t
+	}
+	return "UDP"
 }
 
 // buildAck 构造 ACK 请求，基于 INVITE 请求和 200 OK 响应。
@@ -300,18 +312,19 @@ func buildAck(invite *sip.Request, okResp *sip.Response) *sip.Request {
 	ack := sip.NewRequest(sip.ACK, recipient)
 	ack.SipVersion = invite.SipVersion
 
-	// Via：branch 必须新生成。
-	origVia := invite.Via()
-	viaHop := &sip.ViaHeader{
-		ProtocolName:    "SIP",
-		ProtocolVersion: "2.0",
-		Transport:       "UDP",
-		Host:            origVia.Host,
-		Port:            origVia.Port,
-		Params:          sip.NewParams(),
+	// Via：branch 必须新生成，transport 跟随原 INVITE 实际使用的传输方式。
+	if origVia := invite.Via(); origVia != nil {
+		viaHop := &sip.ViaHeader{
+			ProtocolName:    "SIP",
+			ProtocolVersion: "2.0",
+			Transport:       requestTransport(invite),
+			Host:            origVia.Host,
+			Port:            origVia.Port,
+			Params:          sip.NewParams(),
+		}
+		viaHop.Params.Add("branch", sip.GenerateBranch())
+		ack.AppendHeader(viaHop)
 	}
-	viaHop.Params.Add("branch", sip.GenerateBranch())
-	ack.AppendHeader(viaHop)
 
 	if header := invite.From(); header != nil {
 		ack.AppendHeader(sip.HeaderClone(header))
@@ -355,17 +368,19 @@ func buildBye(dialogReq *sip.Request, dialogResp *sip.Response) *sip.Request {
 	bye := sip.NewRequest(sip.BYE, recipient)
 	bye.SipVersion = dialogReq.SipVersion
 
-	origVia := dialogReq.Via()
-	viaHop := &sip.ViaHeader{
-		ProtocolName:    "SIP",
-		ProtocolVersion: "2.0",
-		Transport:       "UDP",
-		Host:            origVia.Host,
-		Port:            origVia.Port,
-		Params:          sip.NewParams(),
+	// Via：branch 必须新生成，transport 跟随原请求实际使用的传输方式。
+	if origVia := dialogReq.Via(); origVia != nil {
+		viaHop := &sip.ViaHeader{
+			ProtocolName:    "SIP",
+			ProtocolVersion: "2.0",
+			Transport:       requestTransport(dialogReq),
+			Host:            origVia.Host,
+			Port:            origVia.Port,
+			Params:          sip.NewParams(),
+		}
+		viaHop.Params.Add("branch", sip.GenerateBranch())
+		bye.AppendHeader(viaHop)
 	}
-	viaHop.Params.Add("branch", sip.GenerateBranch())
-	bye.AppendHeader(viaHop)
 
 	if header := dialogReq.From(); header != nil {
 		bye.AppendHeader(sip.HeaderClone(header))
@@ -401,7 +416,7 @@ type internalSession struct {
 	calleeOK   *sip.Response // 被叫的 200 OK（To 带被叫 tag）
 	client     *sipgo.Client
 	logger     *slog.Logger
-	done       chan struct{} // 对侧 BYE 转发完成后关闭，唤醒 waitAckAndBye
+	done       chan struct{} // 对侧 BYE 转发完成后关闭，唤醒 waitForHangup
 }
 
 // forwardByeToPeer 一方挂断后，给对侧构造并发送 BYE，让对方 Linphone 立即结束通话。

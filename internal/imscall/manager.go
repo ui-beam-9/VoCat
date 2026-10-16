@@ -710,15 +710,8 @@ func (manager *Manager) endCall(finalCode int, finalReason string, notifyClient 
 	}
 	client := manager.registrar.GetClient()
 	if call.isOutbound {
-		// 外呼方向：已接通时向软电话发送 BYE。
-		if call.answered200 && call.serverReq != nil {
-			bye := sip.NewRequest(sip.BYE, call.serverReq.From().Address)
-			sip.CopyHeaders("To", call.serverReq, bye)
-			sip.CopyHeaders("From", call.serverReq, bye)
-			sip.CopyHeaders("Call-ID", call.serverReq, bye)
-			bye.AppendHeader(sip.NewHeader("CSeq", fmt.Sprintf("%d BYE", call.serverReq.CSeq().SeqNo+1)))
-			_ = client.WriteRequest(bye)
-		}
+		// 外呼方向：按阶段通知软电话结束（未接通补 480，已接通发 BYE）。
+		manager.notifySoftphoneOutboundEnd(call)
 		return
 	}
 	if call.clientReq == nil {
@@ -741,6 +734,93 @@ func (manager *Manager) endCall(finalCode int, finalReason string, notifyClient 
 	sip.CopyHeaders("Call-ID", call.clientReq, bye)
 	bye.AppendHeader(sip.NewHeader("CSeq", fmt.Sprintf("%d BYE", call.clientReq.CSeq().SeqNo+1)))
 	_ = client.WriteRequest(bye)
+}
+
+// notifySoftphoneOutboundEnd 外呼结束时通知发起的软电话，让对方界面立即结束通话。
+//
+// 未接通时 INVITE 服务端事务还没送最终响应，补一条 480 结束呼叫；
+// 已接通时发一条 in-dialog 的 BYE。
+//
+// 方向很关键：外呼时 VoCat 对软电话是 UAS，BYE 必须按 UAS→UAC 构造
+// （Request-URI = 软电话 INVITE 的 Contact，From = INVITE 的 To，To = INVITE 的 From）。
+// 之前误把 INVITE 的 From 地址当作 Request-URI，而它的 host 是 SIP 服务器自身，
+// BYE 回环到 VoCat（日志表现为 Unhandled sip response 200 来自服务器地址），
+// 软电话永远收不到，界面一直停留在通话中。
+func (manager *Manager) notifySoftphoneOutboundEnd(call *imsCall) {
+	if call == nil || call.serverReq == nil {
+		return
+	}
+	if !call.answered200 {
+		manager.sendFinal(call, 480, "Temporarily Unavailable", nil)
+		return
+	}
+	bye, err := buildUasBye(call.serverReq)
+	if err != nil {
+		manager.logger.Warn("外呼结束通知软电话失败：构造 BYE 出错", "err", err)
+		return
+	}
+	username := ""
+	if from := call.serverReq.From(); from != nil {
+		username = from.Address.User
+		// 目标优先用软电话注册时的 Contact + 传输方式；注册过期时退回 INVITE 的 Contact 地址。
+		if user := manager.registrar.GetUserByUsername(username); user != nil && user.ContactAddr != nil {
+			bye.SetDestination(user.ContactAddr.String())
+			if user.Transport != "" {
+				bye.SetTransport(user.Transport)
+			}
+		} else if contact := call.serverReq.Contact(); contact != nil {
+			bye.SetDestination(fmt.Sprintf("%s:%d", contact.Address.Host, contact.Address.Port))
+		}
+	}
+	sendCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if _, err := manager.registrar.GetClient().TransactionRequest(sendCtx, bye); err != nil {
+		manager.logger.Warn("外呼结束 BYE 发送失败", "username", username, "err", err)
+		return
+	}
+	manager.logger.Info("外呼结束，已向软电话发送 BYE", "username", username)
+}
+
+// buildUasBye 构造 UAS→UAC 方向的 BYE（外呼被对端挂断时，VoCat 通知软电话结束通话）。
+// invite 是软电话发来的 INVITE（此时 VoCat 是 UAS）：
+//   - Request-URI = invite 的 Contact（软电话在该 dialog 中的远端目标）
+//   - From = invite 的 To（VoCat 侧标识，含 VoCat 生成的 tag）
+//   - To   = invite 的 From（软电话侧标识，含软电话的 tag）
+//
+// Via 不手工构造，交给 sipgo 的 TransactionRequest 按实际连接生成。
+func buildUasBye(invite *sip.Request) (*sip.Request, error) {
+	contact := invite.Contact()
+	if contact == nil {
+		return nil, fmt.Errorf("软电话 INVITE 缺少 Contact 头")
+	}
+	recipient := sip.Uri{
+		Scheme: contact.Address.Scheme,
+		User:   contact.Address.User,
+		Host:   contact.Address.Host,
+		Port:   contact.Address.Port,
+	}
+	bye := sip.NewRequest(sip.BYE, recipient)
+	bye.SipVersion = invite.SipVersion
+
+	if h := invite.To(); h != nil {
+		bye.AppendHeader(sip.HeaderClone(h))
+	}
+	if h := invite.From(); h != nil {
+		bye.AppendHeader(sip.HeaderClone(h))
+	}
+	if h := invite.CallID(); h != nil {
+		bye.AppendHeader(sip.HeaderClone(h))
+	}
+	if h := invite.CSeq(); h != nil {
+		cloned := sip.HeaderClone(h).(*sip.CSeqHeader)
+		cloned.MethodName = sip.BYE
+		cloned.SeqNo++
+		bye.AppendHeader(cloned)
+	}
+	maxForwards := sip.MaxForwardsHeader(70)
+	bye.AppendHeader(&maxForwards)
+	bye.SetBody(nil)
+	return bye, nil
 }
 
 // sendFinal 幂等地向 INVITE 服务端事务发送最终响应。
