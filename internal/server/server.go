@@ -212,6 +212,10 @@ type VoWiFiMaintenanceController interface {
 	EndMaintenance(string)
 }
 
+type VoWiFiUnregisterController interface {
+	Unregister(context.Context, string) error
+}
+
 type VoWiFiCallController interface {
 	Calls(string) ([]vowifi.Call, error)
 	DialCall(context.Context, string, string) (vowifi.Call, error)
