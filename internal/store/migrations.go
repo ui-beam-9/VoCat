@@ -506,30 +506,6 @@ func migrationStatements(version int) []string {
 		}
 	case 27:
 		return []string{
-			// Physical records are independent of decoded messages: even an
-			// unreadable sender or a failed multipart merge must remain recoverable.
-			`CREATE TABLE IF NOT EXISTS sms_raw_records (
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				hardware_key TEXT NOT NULL,
-				device_id TEXT NOT NULL,
-				modem_imei TEXT NOT NULL DEFAULT '',
-				iccid TEXT NOT NULL DEFAULT '',
-				imsi TEXT NOT NULL DEFAULT '',
-				storage TEXT NOT NULL,
-				slot INTEGER NOT NULL,
-				pdu_hash TEXT NOT NULL,
-				raw_pdu TEXT NOT NULL,
-				raw_user_data TEXT NOT NULL DEFAULT '',
-				encoding TEXT NOT NULL DEFAULT '',
-				decode_error TEXT NOT NULL DEFAULT '',
-				first_seen INTEGER NOT NULL,
-				last_seen INTEGER NOT NULL,
-				UNIQUE(hardware_key, storage, slot, pdu_hash)
-			)`,
-			`CREATE INDEX IF NOT EXISTS sms_raw_records_device_idx ON sms_raw_records(device_id, id DESC)`,
-		}
-	case 28:
-		return []string{
 			// VoWiFi 通话记录由服务端持久化，供任意浏览器/设备查看与清空。
 			`CREATE TABLE IF NOT EXISTS call_history (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -554,15 +530,38 @@ func migrationStatements(version int) []string {
 			)`,
 			`CREATE INDEX IF NOT EXISTS contacts_name_idx ON contacts(name)`,
 		}
-	case 29:
+	case 28:
 		return []string{
+			// 兼容从 master 的 v27 库升级：master 的 27 是短信原始记录，
+			// 通话记录/通讯录表尚未建立，这里先补建（IF NOT EXISTS 幂等）。
+			`CREATE TABLE IF NOT EXISTS call_history (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				device_id TEXT NOT NULL DEFAULT '',
+				number TEXT NOT NULL,
+				direction TEXT NOT NULL CHECK (direction IN ('incoming', 'outgoing')),
+				outcome TEXT NOT NULL CHECK (outcome IN ('answered', 'missed', 'failed')),
+				started_at INTEGER NOT NULL,
+				ended_at INTEGER NOT NULL,
+				duration_seconds INTEGER NOT NULL DEFAULT 0,
+				created_at INTEGER NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS call_history_started_at_idx
+				ON call_history(started_at DESC, id DESC)`,
+			`CREATE TABLE IF NOT EXISTS contacts (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				name TEXT NOT NULL,
+				number TEXT NOT NULL UNIQUE,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS contacts_name_idx ON contacts(name)`,
 			// 以 IMS Call-ID 去重：前端刷新/重挂载会重复上报同一通已结束的来电，
 			// 唯一索引保证只保留一条（call_id 为空的历史记录不受约束）。
 			`ALTER TABLE call_history ADD COLUMN call_id TEXT NOT NULL DEFAULT ''`,
 			`CREATE UNIQUE INDEX IF NOT EXISTS call_history_call_id_idx
 				ON call_history(call_id) WHERE call_id <> ''`,
 		}
-	case 30:
+	case 29:
 		return []string{
 			// 号码归属地 + 运营商缓存：同号只查一次上游接口，之后走数据库。
 			`CREATE TABLE IF NOT EXISTS phone_locations (
@@ -574,7 +573,7 @@ func migrationStatements(version int) []string {
 				updated_at INTEGER NOT NULL
 			)`,
 		}
-	case 31:
+	case 30:
 		return []string{
 			// 通话结果新增 rejected（本地拒接）：SQLite 无法修改 CHECK 约束，
 			// 重建 call_history 表放宽取值范围并保留历史记录。
@@ -598,6 +597,30 @@ func migrationStatements(version int) []string {
 				ON call_history(started_at DESC, id DESC)`,
 			`CREATE UNIQUE INDEX IF NOT EXISTS call_history_call_id_idx
 				ON call_history(call_id) WHERE call_id <> ''`,
+		}
+	case 31:
+		return []string{
+			// Physical records are independent of decoded messages: even an
+			// unreadable sender or a failed multipart merge must remain recoverable.
+			`CREATE TABLE IF NOT EXISTS sms_raw_records (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				hardware_key TEXT NOT NULL,
+				device_id TEXT NOT NULL,
+				modem_imei TEXT NOT NULL DEFAULT '',
+				iccid TEXT NOT NULL DEFAULT '',
+				imsi TEXT NOT NULL DEFAULT '',
+				storage TEXT NOT NULL,
+				slot INTEGER NOT NULL,
+				pdu_hash TEXT NOT NULL,
+				raw_pdu TEXT NOT NULL,
+				raw_user_data TEXT NOT NULL DEFAULT '',
+				encoding TEXT NOT NULL DEFAULT '',
+				decode_error TEXT NOT NULL DEFAULT '',
+				first_seen INTEGER NOT NULL,
+				last_seen INTEGER NOT NULL,
+				UNIQUE(hardware_key, storage, slot, pdu_hash)
+			)`,
+			`CREATE INDEX IF NOT EXISTS sms_raw_records_device_idx ON sms_raw_records(device_id, id DESC)`,
 		}
 	default:
 		return nil

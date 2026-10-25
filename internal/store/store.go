@@ -141,7 +141,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 					(nextVersion == 23 && strings.Contains(statement, "ADD COLUMN")) ||
 					(nextVersion == 24 && strings.Contains(statement, "ADD COLUMN mbn_profile")) ||
 					(nextVersion == 26 && strings.Contains(statement, "ADD COLUMN revert_profile")) ||
-					(nextVersion == 29 && strings.Contains(statement, "ADD COLUMN call_id"))
+					(nextVersion == 28 && strings.Contains(statement, "ADD COLUMN call_id"))
 				if duplicateAdditiveColumn && strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 					continue
 				}
