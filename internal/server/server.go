@@ -200,6 +200,8 @@ func New(options Options) (*Server, error) {
 	// 因此必须绕过 requireAuthenticated 直接注册在 mux 上。
 	mux.HandleFunc("/api/auth/oidc/status", server.handleOIDCStatus)
 	mux.HandleFunc("/api/auth/oidc/login", server.handleOIDCLogin)
+	// 弹窗登录需要先取一次性授权地址（POST），与整页跳转的 /api/auth/oidc/login 精确路径互不冲突。
+	mux.HandleFunc("/api/auth/oidc/login/start", server.handleOIDCLoginStart)
 	mux.HandleFunc("/api/auth/oidc/callback", server.handleOIDCCallback)
 	mux.HandleFunc("/api", server.handleAPI)
 	mux.HandleFunc("/api/", server.handleAPI)
@@ -696,20 +698,20 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(self), geolocation=()")
-		if strings.HasPrefix(r.URL.Path, "/websheets/") || strings.HasPrefix(r.URL.Path, "/plugin-assets/") {
-			// The self-hosted E911 websheet is embedded in an iframe by the SPA, so
-			// it must be frameable same-origin. Every other route stays DENY.
-			w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+		if r.URL.Path == oidc.DefaultCallbackPath {
+			// OIDC 授权弹窗的结果页依赖内联脚本向 opener 发送 postMessage 并关闭窗口，
+			// 因此仅对该路径放行内联脚本；新窗口流程不再被嵌入，仍保持 X-Frame-Options: DENY。
+			w.Header().Set("X-Frame-Options", "DENY")
 			w.Header().Set(
 				"Content-Security-Policy",
-				"default-src 'self'; base-uri 'self'; frame-ancestors 'self'; "+
+				"default-src 'self'; base-uri 'self'; frame-ancestors 'none'; "+
 					"object-src 'none'; form-action 'self'; "+
 					"script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; "+
 					"img-src 'self' data:; connect-src 'self'",
 			)
-		} else if r.URL.Path == oidcCallbackResultPath {
-			// OIDC 绑定弹窗用同源 iframe 加载授权页，回调结果页也必须允许同源嵌入；
-			// 结果页内联脚本负责 postMessage 通知父窗口。
+		} else if strings.HasPrefix(r.URL.Path, "/websheets/") || strings.HasPrefix(r.URL.Path, "/plugin-assets/") {
+			// The self-hosted E911 websheet is embedded in an iframe by the SPA, so
+			// it must be frameable same-origin. Every other route stays DENY.
 			w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 			w.Header().Set(
 				"Content-Security-Policy",
@@ -725,9 +727,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 				"default-src 'self'; base-uri 'self'; frame-ancestors 'none'; "+
 					"object-src 'none'; form-action 'self'; "+
 					"script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; "+
-					"img-src 'self' data:; connect-src 'self'; "+
-					// 绑定弹窗需要 iframe 加载 IDP 授权页：放行已缓存授权端点 origin（不可解析时退回 'self'）。
-					"frame-src "+s.oidcFrameSources(),
+					"img-src 'self' data:; connect-src 'self'",
 			)
 		}
 		if s.secureCookies && s.https == nil {

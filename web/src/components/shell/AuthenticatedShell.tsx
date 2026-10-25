@@ -29,6 +29,8 @@ import { VersionBadge } from "./VersionBadge";
 import { IncomingCallWatcher } from "../IncomingCallWatcher";
 import { listPlugins, type InstalledPlugin } from "../../extensions";
 import { api, apiMessage, deleteOIDCBinding, getOIDCStatus } from "../../api";
+import { OIDC_BIND_POPUP_NAME, openOIDCPopup } from "../../lib/oidcPopup";
+import { notifyOIDCChanged, onOIDCChanged } from "../../lib/oidcEvents";
 import type { OIDCStatus, SystemInfo } from "../../types";
 
 // 用户菜单项样式：普通项与退出项（退出项使用红色悬停语义）。
@@ -62,6 +64,7 @@ export function AuthenticatedShell({
   const [developer, setDeveloper] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [bindDialogOpen, setBindDialogOpen] = useState(false);
+  const [bindPopup, setBindPopup] = useState<Window | null>(null);
   const [oidcStatus, setOIDCStatus] = useState<OIDCStatus | null>(null);
   const [oidcBusy, setOIDCBusy] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
@@ -84,9 +87,37 @@ export function AuthenticatedShell({
     void loadOIDCStatus();
   }, [loadOIDCStatus]);
 
+  // 系统设置里保存/解绑 OIDC 后广播事件：左下角菜单立即刷新，无需手动刷新页面。
+  // 忽略 shell 自己发出的事件（本地刷新已显式执行），避免重复请求。
+  useEffect(() => {
+    const refresh = () => {
+      void loadOIDCStatus();
+    };
+    return onOIDCChanged(refresh, "shell");
+  }, [loadOIDCStatus]);
+
+  // 兜底刷新：绑定弹窗的 postMessage 若因浏览器策略丢失（授权窗口被手动关闭等），
+  // 回到页面（窗口重新获得焦点/标签页可见）时也重新拉取状态，无需手动刷新整页。
+  useEffect(() => {
+    const refresh = () => {
+      void loadOIDCStatus();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [loadOIDCStatus]);
+
   const closeBindDialog = useCallback(() => setBindDialogOpen(false), []);
   const onBoundOIDC = useCallback(() => {
     void loadOIDCStatus();
+    // 绑定成功：通知设置卡片刷新「当前绑定信息」，无需手动刷新页面。
+    notifyOIDCChanged("shell");
   }, [loadOIDCStatus]);
 
   // 点击菜单外部或按 Esc 关闭用户菜单。
@@ -162,8 +193,15 @@ export function AuthenticatedShell({
     }
   }
 
+  // 在点击手势内同步打开授权弹出窗口：多数 IDP（Authentik/Keycloak 等）禁止被 iframe 嵌入，
+  // 因此绑定授权一律走新窗口；异步之后再 open 会被浏览器判定为非用户手势而拦截。
+  const openBindPopup = useCallback((): Window | null => {
+    return openOIDCPopup(OIDC_BIND_POPUP_NAME);
+  }, []);
+
   function openBindDialog() {
     setUserMenuOpen(false);
+    setBindPopup(openBindPopup());
     setBindDialogOpen(true);
   }
 
@@ -180,6 +218,8 @@ export function AuthenticatedShell({
     try {
       await deleteOIDCBinding();
       message.success(t("OIDC 用户已解绑"));
+      // 解绑成功：通知设置卡片刷新「当前绑定信息」，无需手动刷新页面。
+      notifyOIDCChanged("shell");
     } catch (error) {
       message.error(apiMessage(error) || t("解绑 OIDC 用户失败"));
     } finally {
@@ -404,6 +444,8 @@ export function AuthenticatedShell({
         open={bindDialogOpen}
         onClose={closeBindDialog}
         onBound={onBoundOIDC}
+        popup={bindPopup}
+        onOpenPopup={openBindPopup}
       />
     </div>
   );

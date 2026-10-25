@@ -5,6 +5,7 @@ import type {
   OIDCBindStart,
   OIDCBindingState,
   OIDCDiscovery,
+  OIDCLoginStart,
   OIDCSettings,
   OIDCStatus,
   SecuritySettings,
@@ -255,9 +256,14 @@ export function getOIDCBinding() {
   return api<OIDCBindingState>("/settings/oidc/binding");
 }
 
-// 发起绑定：返回 OIDC 授权地址，供绑定弹窗内 iframe 加载。
+// 发起绑定：返回 OIDC 授权地址，供绑定弹窗写入弹出窗口。
 export function startOIDCBinding() {
   return api<OIDCBindStart>("/settings/oidc/binding", { method: "POST", body: {} });
+}
+
+// 登录页弹窗登录：返回一次性授权地址，前端写入居中弹出窗口完成授权。
+export function startOIDCLogin(redirect: string) {
+  return api<OIDCLoginStart>("/auth/oidc/login/start", { method: "POST", body: { redirect } });
 }
 
 export function deleteOIDCBinding() {

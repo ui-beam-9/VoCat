@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactElement } from "react";
-import { Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation, useSearchParams } from "react-router-dom";
 import { AuthProvider, useAuth } from "./store/auth";
 import { LanguageProvider } from "./lib/i18n";
 import { AuthenticatedShell } from "./components/shell/AuthenticatedShell";
@@ -56,7 +56,14 @@ function RequireAuth({ children }: { children: ReactElement }) {
 
 function LoginLayout({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: () => void }) {
   const { ready, isAuthenticated } = useAuth();
-  if (ready && isAuthenticated) return <Navigate to="/" replace />;
+  const [searchParams] = useSearchParams();
+  if (ready && isAuthenticated) {
+    // OIDC 弹窗登录成功后会话即时生效，这里按 ?redirect= 回跳原目标页；
+    // 只接受站内绝对路径，避免被构造成跳往站外。
+    const redirect = searchParams.get("redirect");
+    const target = redirect && redirect.startsWith("/") && !redirect.startsWith("//") ? redirect : "/";
+    return <Navigate to={target} replace />;
+  }
   return <UnauthenticatedShell isDark={isDark} onToggleTheme={onToggleTheme} />;
 }
 

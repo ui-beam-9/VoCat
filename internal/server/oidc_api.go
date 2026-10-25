@@ -26,12 +26,16 @@ const (
 	oidcConnectTimeout = 15 * time.Second
 	// oidcLoginURL 是登录页 OIDC 按钮指向的地址。
 	oidcLoginURL = "/api/auth/oidc/login"
-	// oidcCallbackResultPath 是回调结果页路径（需要允许同源 iframe 渲染）。
-	oidcCallbackResultPath = "/api/auth/oidc/callback"
+	// oidcLoginPopupMode 是登录页弹窗登录（POST /api/auth/oidc/login/start）的 pending state 模式：
+	// 回调不 302，而是在弹出窗口内返回结果页并通过 postMessage 通知 opener。
+	// oidc.NewAuthorizationRequest 只接受 login/bind，授权 URL 本身与 mode 无关，
+	// 因此发起时按 login 构造，弹窗语义仅记录在 pending state 里。
+	oidcLoginPopupMode = "login_popup"
 )
 
 // oidcPendingState 记录一次 OIDC 授权流程的服务端临时状态。
-// state 不通过 Cookie 传递：绑定弹窗 iframe 内的回调拿不到 SameSite Cookie。
+// state 不通过 Cookie 传递：绑定授权在独立弹出窗口完成、登录回调是跨站跳转，
+// SameSite 严格 Cookie 在这些场景下会丢失。
 type oidcPendingState struct {
 	Nonce        string
 	CodeVerifier string
@@ -420,7 +424,64 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, authorization.URL, http.StatusFound)
 }
 
-// handleOIDCCallback 处理 IDP 回调：登录模式签发会话并 302 回站内，
+// handleOIDCLoginStart 是登录页弹窗登录的公开发起接口：返回一次性授权地址，
+// 由前端写入居中弹出窗口完成 IDP 授权；回调在弹窗内返回结果页并通知 opener。
+func (s *Server) handleOIDCLoginStart(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	var request struct {
+		Redirect string `json:"redirect"`
+	}
+	// 允许空 body：redirect 缺失时按 "/" 处理。
+	if r.ContentLength != 0 {
+		if err := s.decodeJSON(w, r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+	}
+	redirectPath := sanitizeOIDCRedirectPath(request.Redirect)
+	snapshot := s.oidcState()
+	if !snapshot.enabled() {
+		writeError(w, http.StatusBadRequest, "oidc_unavailable", "OIDC 未启用或端点尚未就绪")
+		return
+	}
+	callbackURL := oidc.SelectCallbackURL(
+		snapshot.Config.CallbackURLs,
+		r.Host,
+		s.oidcSecureRequest(r),
+	)
+	authorization, err := oidc.NewAuthorizationRequest(
+		snapshot.Metadata,
+		snapshot.Config,
+		callbackURL,
+		redirectPath,
+		"login",
+	)
+	if err != nil {
+		s.logger.Error("构建 OIDC 弹窗登录授权请求失败", "error", err)
+		writeError(w, http.StatusInternalServerError, "oidc_authorization_failed", err.Error())
+		return
+	}
+	s.oidcStorePending(authorization.State, oidcPendingState{
+		Nonce:        authorization.Nonce,
+		CodeVerifier: authorization.CodeVerifier,
+		RedirectURI:  authorization.RedirectURI,
+		RedirectPath: redirectPath,
+		Mode:         oidcLoginPopupMode,
+		CreatedAt:    time.Now(),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": map[string]any{
+			"authorization_url": authorization.URL,
+			"mode":              oidcLoginPopupMode,
+			"redirect":          redirectPath,
+		},
+	})
+}
+
+// handleOIDCCallback 处理 IDP 回调：登录模式签发会话并 302 回站内（或弹窗模式返回结果页），
 // 绑定模式写入绑定关系并返回带 postMessage 的结果页。
 func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -478,9 +539,22 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	s.oidcCompleteLogin(w, r, pending, identity, snapshot)
 }
 
-// oidcCallbackFailure 按模式输出失败结果：登录模式回登录页，绑定模式返回结果页。
+// oidcCallbackFailure 按模式输出失败结果：弹窗登录返回登录失败结果页，
+// 整页跳转登录回登录页，绑定模式（含未知 state 的兜底）返回绑定失败结果页。
 func (s *Server) oidcCallbackFailure(w http.ResponseWriter, r *http.Request, mode string, message string) {
-	if mode == "login" {
+	switch mode {
+	case oidcLoginPopupMode:
+		s.recordAudit(
+			r.Context(),
+			"admin",
+			"auth.oidc.login",
+			"session",
+			"admin",
+			"failure",
+			requestRemoteHost(r),
+		)
+		writeOIDCLoginResult(w, false, message)
+	case "login":
 		s.recordAudit(
 			r.Context(),
 			"admin",
@@ -491,18 +565,18 @@ func (s *Server) oidcCallbackFailure(w http.ResponseWriter, r *http.Request, mod
 			requestRemoteHost(r),
 		)
 		http.Redirect(w, r, "/login", http.StatusFound)
-		return
+	default:
+		s.recordAudit(
+			r.Context(),
+			"admin",
+			"settings.oidc.binding.bind",
+			"settings",
+			"oidc",
+			"failure",
+			requestRemoteHost(r),
+		)
+		writeOIDCBindResult(w, false, message)
 	}
-	s.recordAudit(
-		r.Context(),
-		"admin",
-		"settings.oidc.binding.bind",
-		"settings",
-		"oidc",
-		"failure",
-		requestRemoteHost(r),
-	)
-	writeOIDCBindResult(w, false, message)
 }
 
 // oidcCompleteBinding 处理绑定模式回调：校验身份后写入绑定关系。
@@ -558,7 +632,8 @@ func (s *Server) oidcCompleteBinding(
 	writeOIDCBindResult(w, true, "")
 }
 
-// oidcCompleteLogin 处理登录模式回调：校验绑定身份后用已确认的管理员签发会话。
+// oidcCompleteLogin 处理登录回调：校验绑定身份后用已确认的管理员签发会话。
+// 弹窗登录模式返回结果页并通知 opener，整页跳转模式仍 302 回站内。
 func (s *Server) oidcCompleteLogin(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -566,24 +641,27 @@ func (s *Server) oidcCompleteLogin(
 	identity oidc.Identity,
 	snapshot oidcSnapshot,
 ) {
+	fail := func(message string) {
+		s.oidcCallbackFailure(w, r, pending.Mode, message)
+	}
 	if !snapshot.bindingValid() {
-		s.oidcCallbackFailure(w, r, "login", oidc.ErrNotBound.Error())
+		fail(oidc.ErrNotBound.Error())
 		return
 	}
 	if err := oidc.VerifyBinding(identity, snapshot.Binding); err != nil {
-		s.oidcCallbackFailure(w, r, "login", err.Error())
+		fail(err.Error())
 		return
 	}
 	admin, err := s.store.CurrentAdmin(r.Context())
 	if err != nil {
 		s.logger.Error("读取管理员账号失败", "error", err)
-		s.oidcCallbackFailure(w, r, "login", "读取管理员账号失败")
+		fail("读取管理员账号失败")
 		return
 	}
 	credentials, err := s.auth.IssueSession(r.Context(), admin)
 	if err != nil {
 		s.logger.Error("OIDC 登录签发会话失败", "error", err)
-		s.oidcCallbackFailure(w, r, "login", "签发登录会话失败")
+		fail("签发登录会话失败")
 		return
 	}
 	s.recordAudit(
@@ -596,6 +674,10 @@ func (s *Server) oidcCompleteLogin(
 		requestRemoteHost(r),
 	)
 	s.setAuthCookies(w, credentials.SessionToken, credentials.CSRFToken, credentials.ExpiresAt)
+	if pending.Mode == oidcLoginPopupMode {
+		writeOIDCLoginResult(w, true, "")
+		return
+	}
 	http.Redirect(w, r, sanitizeOIDCRedirectPath(pending.RedirectPath), http.StatusFound)
 }
 
@@ -812,21 +894,9 @@ func (s *Server) oidcBindingPayload() map[string]any {
 	}
 }
 
-// oidcFrameSources 返回 CSP frame-src 的值：OIDC 已启用且已发现端点时放行授权端点 origin，
-// 端点不可解析时退回 'self'（站内 websheet iframe 需要）。
-func (s *Server) oidcFrameSources() string {
-	snapshot := s.oidcState()
-	if snapshot.enabled() {
-		if origin := strings.TrimSpace(snapshot.Metadata.EndpointOrigin()); origin != "" {
-			return "'self' " + origin
-		}
-	}
-	return "'self'"
-}
-
-// oidcBindResultTemplate 是绑定模式回调的结果页。同源 iframe 内渲染后通过
-// postMessage 通知父窗口/opener，父窗口据此刷新绑定状态。
-const oidcBindResultTemplate = `<!DOCTYPE html>
+// oidcResultPageTemplate 是 OIDC 授权弹窗（绑定/登录）的结果页：在弹出窗口内渲染后，
+// 通过 postMessage 通知 opener（站内页面），并按需关闭弹出窗口。
+const oidcResultPageTemplate = `<!DOCTYPE html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
@@ -837,16 +907,19 @@ const oidcBindResultTemplate = `<!DOCTYPE html>
 <script>
 (function () {
   var message = %s;
+  var closeWhenDone = %t;
   try {
     if (window.parent && window.parent !== window) {
       window.parent.postMessage(message, "*");
     }
     if (window.opener) {
       window.opener.postMessage(message, "*");
-      window.close();
+      if (closeWhenDone) {
+        window.close();
+      }
     }
   } catch (error) {
-    // 忽略跨窗口通信异常，页面本身仍展示绑定结果。
+    // 忽略跨窗口通信异常，页面本身仍展示结果。
   }
 })();
 </script>
@@ -854,34 +927,76 @@ const oidcBindResultTemplate = `<!DOCTYPE html>
 </html>
 `
 
-// writeOIDCBindResult 输出绑定结果页（成功/失败）。
-func writeOIDCBindResult(w http.ResponseWriter, success bool, detail string) {
-	title := "OIDC 绑定成功"
-	text := "绑定成功，可以关闭此窗口"
-	message := map[string]any{"type": "vocat:oidc-bound"}
-	if !success {
-		title = "OIDC 绑定失败"
-		text = "绑定失败：" + detail
-		message = map[string]any{"type": "vocat:oidc-error", "message": detail}
-	}
-	encoded, err := json.Marshal(message)
+// oidcResultPage 描述一张 OIDC 弹窗结果页：标题、正文、postMessage 载荷与 HTTP 状态码。
+type oidcResultPage struct {
+	Title         string
+	Text          string
+	Message       map[string]any
+	CloseOnOpener bool
+	Status        int
+}
+
+// writeOIDCResultPage 输出通用结果页，绑定与登录两种弹窗共用。
+func writeOIDCResultPage(w http.ResponseWriter, page oidcResultPage) {
+	encoded, err := json.Marshal(page.Message)
 	if err != nil {
-		encoded = []byte(`{"type":"vocat:oidc-error","message":"绑定失败"}`)
+		encoded = []byte(`{"type":"vocat:oidc-error","message":"操作失败"}`)
 	}
 	// 避免 message 中出现 </script> 提前闭合脚本标签。
 	script := strings.ReplaceAll(string(encoded), "</", "<\\/")
-	status := http.StatusOK
-	if !success {
-		status = http.StatusBadRequest
-	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(status)
+	w.WriteHeader(page.Status)
 	_, _ = fmt.Fprintf(
 		w,
-		oidcBindResultTemplate,
-		html.EscapeString(title),
-		html.EscapeString(text),
+		oidcResultPageTemplate,
+		html.EscapeString(page.Title),
+		html.EscapeString(page.Text),
 		script,
+		page.CloseOnOpener,
 	)
+}
+
+// writeOIDCBindResult 输出绑定结果页（成功/失败），行为与消息格式保持兼容。
+func writeOIDCBindResult(w http.ResponseWriter, success bool, detail string) {
+	if success {
+		writeOIDCResultPage(w, oidcResultPage{
+			Title:         "OIDC 绑定成功",
+			Text:          "绑定成功，可以关闭此窗口",
+			Message:       map[string]any{"type": "vocat:oidc-bound"},
+			CloseOnOpener: true,
+			Status:        http.StatusOK,
+		})
+		return
+	}
+	writeOIDCResultPage(w, oidcResultPage{
+		Title:         "OIDC 绑定失败",
+		Text:          "绑定失败：" + detail,
+		Message:       map[string]any{"type": "vocat:oidc-error", "message": detail},
+		CloseOnOpener: true,
+		Status:        http.StatusBadRequest,
+	})
+}
+
+// writeOIDCLoginResult 输出登录弹窗结果页（成功/失败）。
+// 两种结果都会在 postMessage 后关闭弹出窗口：成功/失败提示统一由站内弹窗展示，
+// 避免用户还要在 OIDC 弹出窗口里阅读结果。
+func writeOIDCLoginResult(w http.ResponseWriter, success bool, detail string) {
+	if success {
+		writeOIDCResultPage(w, oidcResultPage{
+			Title:         "OIDC 登录成功",
+			Text:          "登录成功，可以关闭此窗口",
+			Message:       map[string]any{"type": "vocat:oidc-login"},
+			CloseOnOpener: true,
+			Status:        http.StatusOK,
+		})
+		return
+	}
+	writeOIDCResultPage(w, oidcResultPage{
+		Title:         "OIDC 登录失败",
+		Text:          "登录失败：" + detail,
+		Message:       map[string]any{"type": "vocat:oidc-error", "message": detail},
+		CloseOnOpener: true,
+		Status:        http.StatusBadRequest,
+	})
 }

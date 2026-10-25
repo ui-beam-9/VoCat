@@ -405,6 +405,62 @@ func (app *oidcTestApplication) bindAdmin(
 	}
 }
 
+// oidcLoginPopupStart 是一次弹窗登录发起接口的响应视图。
+type oidcLoginPopupStart struct {
+	Authorization *url.URL
+	Mode          string
+	Redirect      string
+}
+
+// startLoginPopup 通过公开接口发起一次弹窗登录，返回 IDP 授权 URL 与回传字段。
+func (app *oidcTestApplication) startLoginPopup(
+	t *testing.T,
+	client *http.Client,
+	redirect string,
+) oidcLoginPopupStart {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"redirect": redirect})
+	if err != nil {
+		t.Fatalf("编码弹窗登录请求失败: %v", err)
+	}
+	response, payload := app.do(
+		t,
+		client,
+		http.MethodPost,
+		"/api/auth/oidc/login/start",
+		string(body),
+		"",
+	)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("弹窗登录发起状态 = %d，响应 = %s", response.StatusCode, payload)
+	}
+	var parsed struct {
+		Data struct {
+			AuthorizationURL string `json:"authorization_url"`
+			Mode             string `json:"mode"`
+			Redirect         string `json:"redirect"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(payload, &parsed); err != nil {
+		t.Fatalf("解析弹窗登录响应失败: %v", err)
+	}
+	if parsed.Data.Mode != "login_popup" {
+		t.Fatalf("弹窗登录模式 = %q，期望 login_popup", parsed.Data.Mode)
+	}
+	authorization, err := url.Parse(parsed.Data.AuthorizationURL)
+	if err != nil {
+		t.Fatalf("解析弹窗登录授权地址失败: %v", err)
+	}
+	if authorization.Path != "/authorize" {
+		t.Fatalf("弹窗登录授权地址路径 = %q，期望 /authorize", authorization.Path)
+	}
+	return oidcLoginPopupStart{
+		Authorization: authorization,
+		Mode:          parsed.Data.Mode,
+		Redirect:      parsed.Data.Redirect,
+	}
+}
+
 // TestOIDCStatusIsPublicAndDisabledByDefault 验证状态接口无需登录即可读取，默认未启用。
 func TestOIDCStatusIsPublicAndDisabledByDefault(t *testing.T) {
 	app := newOIDCTestApplication(t)
@@ -611,7 +667,7 @@ func TestOIDCEnabledConfigurationRequiresReachableDiscovery(t *testing.T) {
 	}
 }
 
-// TestOIDCBindingAndLoginFlow 覆盖绑定闭环、状态视图、CSP frame-src 与 OIDC 登录闭环。
+// TestOIDCBindingAndLoginFlow 覆盖绑定闭环、状态视图、CSP/iframe 安全基线与 OIDC 登录闭环。
 func TestOIDCBindingAndLoginFlow(t *testing.T) {
 	idp := newFakeOIDCIdentityProvider(t)
 	app := newOIDCTestApplication(t)
@@ -693,11 +749,26 @@ func TestOIDCBindingAndLoginFlow(t *testing.T) {
 		t.Fatalf("绑定后状态 = %+v，期望 enabled/bound 均为 true", status.Data)
 	}
 
-	// SPA 页面 CSP 放行 IDP 授权端点 origin 到 frame-src。
+	// 绑定授权在独立弹出窗口完成，因此页面 CSP 不再为 IDP 放行 frame-src；
+	// 回调结果页也保持默认的 X-Frame-Options: DENY（不再被 iframe 嵌入）。
 	response, _ = app.do(t, app.client, http.MethodGet, "/", "", "")
 	csp := response.Header.Get("Content-Security-Policy")
-	if !strings.Contains(csp, "frame-src 'self' "+idp.server.URL) {
-		t.Fatalf("SPA CSP 未放行 IDP origin: %q", csp)
+	if strings.Contains(csp, "frame-src") {
+		t.Fatalf("SPA CSP 不应再包含 frame-src: %q", csp)
+	}
+	if strings.Contains(csp, "script-src 'self' 'unsafe-inline'") {
+		t.Fatalf("SPA CSP 不应放行内联脚本: %q", csp)
+	}
+	// 回调结果页需要执行内联 postMessage 脚本，因此只对该路径放行内联脚本。
+	response, _ = app.do(t, app.client, http.MethodGet, "/api/auth/oidc/callback?state=unknown", "", "")
+	if xfo := response.Header.Get("X-Frame-Options"); xfo != "DENY" {
+		t.Fatalf("OIDC 回调页 X-Frame-Options = %q，期望 DENY", xfo)
+	}
+	if callbackCSP := response.Header.Get("Content-Security-Policy"); !strings.Contains(
+		callbackCSP,
+		"script-src 'self' 'unsafe-inline'",
+	) {
+		t.Fatalf("OIDC 回调页 CSP 应放行内联脚本（结果页 postMessage）: %q", callbackCSP)
 	}
 
 	// 登出后走 OIDC 登录闭环。
@@ -918,5 +989,155 @@ func TestOIDCBindStartRequiresAuthentication(t *testing.T) {
 	response, _ = app.do(t, sessionClient, http.MethodGet, "/api/auth/oidc/login?mode=other", "", "")
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("非法 mode 状态 = %d，期望 400", response.StatusCode)
+	}
+}
+
+// TestOIDCLoginPopupStartUnavailableWhenDisabled 验证未启用时公开的弹窗登录发起接口返回 400，
+// 并确认新路径只接受 POST、不影响原有 GET 整页跳转入口。
+func TestOIDCLoginPopupStartUnavailableWhenDisabled(t *testing.T) {
+	app := newOIDCTestApplication(t)
+	browser := newBrowserClient(t)
+
+	response, payload := app.do(
+		t,
+		browser,
+		http.MethodPost,
+		"/api/auth/oidc/login/start",
+		`{"redirect":"/devices"}`,
+		"",
+	)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("未启用弹窗登录发起状态 = %d，期望 400，响应 = %s", response.StatusCode, payload)
+	}
+	if !strings.Contains(string(payload), "oidc_unavailable") {
+		t.Fatalf("未启用弹窗登录响应缺少错误码: %s", payload)
+	}
+	if !strings.Contains(string(payload), "OIDC 未启用或端点尚未就绪") {
+		t.Fatalf("未启用弹窗登录响应缺少中文原因: %s", payload)
+	}
+
+	// 新路径只接受 POST。
+	response, _ = app.do(t, browser, http.MethodGet, "/api/auth/oidc/login/start", "", "")
+	if response.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("GET 弹窗登录发起状态 = %d，期望 405", response.StatusCode)
+	}
+	// 原有整页跳转入口保持不变（未启用时为 503）。
+	response, _ = app.do(t, browser, http.MethodGet, "/api/auth/oidc/login", "", "")
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("未启用整页跳转登录状态 = %d，期望 503", response.StatusCode)
+	}
+}
+
+// TestOIDCLoginPopupUnboundShowsErrorPage 验证未绑定账号走弹窗登录时返回错误结果页且不签发会话。
+func TestOIDCLoginPopupUnboundShowsErrorPage(t *testing.T) {
+	idp := newFakeOIDCIdentityProvider(t)
+	app := newOIDCTestApplication(t)
+	csrf := app.loginWithPassword(t)
+	app.configureOIDC(t, csrf, idp, nil)
+
+	browser := newBrowserClient(t)
+	started := app.startLoginPopup(t, browser, "/devices")
+	if started.Redirect != "/devices" {
+		t.Fatalf("弹窗登录回传 redirect = %q，期望 /devices", started.Redirect)
+	}
+	response, payload := app.completeCallback(t, browser, idp, started.Authorization)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("未绑定弹窗登录回调状态 = %d，期望 400，响应 = %s", response.StatusCode, payload)
+	}
+	if !strings.Contains(string(payload), "vocat:oidc-error") {
+		t.Fatalf("未绑定弹窗登录结果页缺少错误 postMessage: %s", payload)
+	}
+	if !strings.Contains(string(payload), oidc.ErrNotBound.Error()) {
+		t.Fatalf("未绑定弹窗登录结果页缺少中文原因: %s", payload)
+	}
+	if !strings.Contains(string(payload), "OIDC 登录失败") {
+		t.Fatalf("未绑定弹窗登录结果页缺少失败标题: %s", payload)
+	}
+	if xfo := response.Header.Get("X-Frame-Options"); xfo != "DENY" {
+		t.Fatalf("弹窗登录结果页 X-Frame-Options = %q，期望 DENY", xfo)
+	}
+	if csp := response.Header.Get("Content-Security-Policy"); !strings.Contains(
+		csp,
+		"script-src 'self' 'unsafe-inline'",
+	) {
+		t.Fatalf("弹窗登录结果页 CSP 应放行内联脚本: %q", csp)
+	}
+
+	// 失败页不应签发会话 Cookie。
+	response, _ = app.do(t, browser, http.MethodGet, "/api/settings/oidc", "", "")
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("未绑定弹窗登录后读取配置状态 = %d，期望 401", response.StatusCode)
+	}
+}
+
+// TestOIDCLoginPopupBoundIssuesSession 验证已绑定账号弹窗登录返回成功结果页并签发可用的会话 Cookie。
+func TestOIDCLoginPopupBoundIssuesSession(t *testing.T) {
+	idp := newFakeOIDCIdentityProvider(t)
+	app := newOIDCTestApplication(t)
+	csrf := app.loginWithPassword(t)
+	app.configureOIDC(t, csrf, idp, nil)
+	app.bindAdmin(t, idp, csrf)
+
+	response, payload := app.do(t, app.client, http.MethodPost, "/api/auth/logout", "", csrf)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("登出状态 = %d，响应 = %s", response.StatusCode, payload)
+	}
+
+	browser := newBrowserClient(t)
+	started := app.startLoginPopup(t, browser, "/devices")
+	if started.Redirect != "/devices" {
+		t.Fatalf("弹窗登录回传 redirect = %q，期望 /devices", started.Redirect)
+	}
+	response, payload = app.completeCallback(t, browser, idp, started.Authorization)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("已绑定弹窗登录回调状态 = %d，期望 200，响应 = %s", response.StatusCode, payload)
+	}
+	if !strings.Contains(string(payload), "vocat:oidc-login") {
+		t.Fatalf("弹窗登录成功页缺少成功 postMessage: %s", payload)
+	}
+	if !strings.Contains(string(payload), "登录成功，可以关闭此窗口") {
+		t.Fatalf("弹窗登录成功页缺少成功文案: %s", payload)
+	}
+	if location := response.Header.Get("Location"); location != "" {
+		t.Fatalf("弹窗登录成功页不应 302，Location = %q", location)
+	}
+	if xfo := response.Header.Get("X-Frame-Options"); xfo != "DENY" {
+		t.Fatalf("弹窗登录成功页 X-Frame-Options = %q，期望 DENY", xfo)
+	}
+	if csp := response.Header.Get("Content-Security-Policy"); !strings.Contains(
+		csp,
+		"script-src 'self' 'unsafe-inline'",
+	) {
+		t.Fatalf("弹窗登录成功页 CSP 应放行内联脚本: %q", csp)
+	}
+
+	// 回调已签发会话 Cookie，后续请求应视为已登录。
+	response, payload = app.do(t, browser, http.MethodGet, "/api/settings/oidc", "", "")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("弹窗登录后读取配置状态 = %d，响应 = %s", response.StatusCode, payload)
+	}
+}
+
+// TestOIDCLoginPopupSanitizesRedirect 验证弹窗登录的 redirect 只接受站内相对路径。
+func TestOIDCLoginPopupSanitizesRedirect(t *testing.T) {
+	idp := newFakeOIDCIdentityProvider(t)
+	app := newOIDCTestApplication(t)
+	csrf := app.loginWithPassword(t)
+	app.configureOIDC(t, csrf, idp, nil)
+	app.bindAdmin(t, idp, csrf)
+
+	browser := newBrowserClient(t)
+	for _, target := range []string{"//evil.example.com/path", "https://evil.example.com/", "javascript:alert(1)"} {
+		started := app.startLoginPopup(t, browser, target)
+		if started.Redirect != "/" {
+			t.Fatalf("redirect=%q 回传 %q，期望退回 /", target, started.Redirect)
+		}
+		response, payload := app.completeCallback(t, browser, idp, started.Authorization)
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("redirect=%q 弹窗登录回调状态 = %d，响应 = %s", target, response.StatusCode, payload)
+		}
+		if !strings.Contains(string(payload), "vocat:oidc-login") {
+			t.Fatalf("redirect=%q 弹窗登录成功页缺少成功 postMessage: %s", target, payload)
+		}
 	}
 }

@@ -578,10 +578,17 @@ export interface OIDCStatus {
   loginUrl: string;
 }
 
-// 发起绑定后拿到的授权地址，用于弹窗内 iframe 加载。
+// 发起绑定后拿到的授权地址，用于写入居中弹出窗口。
 export interface OIDCBindStart {
   authorizationUrl: string;
   mode: string;
+}
+
+// 登录页发起弹窗登录后拿到的授权地址与回跳路径。
+export interface OIDCLoginStart {
+  authorizationUrl: string;
+  mode: string;
+  redirect: string;
 }
 
 // 左下角用户菜单需要的绑定状态。

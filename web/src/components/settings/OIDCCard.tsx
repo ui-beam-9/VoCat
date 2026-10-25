@@ -18,6 +18,7 @@ import { Button, Input, Switch, confirmDialog, message } from "../ui";
 import { OIDCIcon } from "../ui/OIDCIcon";
 import { CardDecor, CardIcon, CardTitle } from "./Cards";
 import { EmptyLine, Field, FieldRow, PasswordInput } from "./controls";
+import { notifyOIDCChanged, onOIDCChanged } from "../../lib/oidcEvents";
 
 // 后端返回的脱敏占位符：回传时后端会保留数据库里的旧密钥。
 const SECRET_MASK = "********";
@@ -72,6 +73,8 @@ function formatBoundAt(value: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
+// 通知其它组件（左下角用户菜单）OIDC 状态已变化，避免手动刷新页面。
+// 卡片自己的刷新由本地回填完成，因此订阅时忽略 settings-card 来源。
 export function OIDCCard() {
   const { t } = useI18n();
   const [settings, setSettings] = useState<OIDCSettings | null>(null);
@@ -91,19 +94,39 @@ export function OIDCCard() {
     setBinding(data.binding ?? null);
   }, []);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  // silent 为 true 时不切换加载骨架屏：用于绑定/解绑/其它标签页触发的后台刷新，避免界面闪烁。
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       applySettings(await getOIDCSettings());
     } catch (error) {
-      message.error(apiMessage(error) || t("OIDC 配置加载失败"));
+      if (!silent) message.error(apiMessage(error) || t("OIDC 配置加载失败"));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [applySettings, t]);
 
   useEffect(() => {
     void load();
+  }, [load]);
+
+  // 绑定/解绑可能发生在左下角菜单或其它标签页：订阅变更事件并静默刷新「当前绑定信息」。
+  useEffect(() => {
+    const reload = () => {
+      void load(true);
+    };
+    const onFocus = () => reload();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") reload();
+    };
+    const unsubscribe = onOIDCChanged(reload, "settings-card");
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      unsubscribe();
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, [load]);
 
   const patch = useCallback((next: Partial<OIDCForm>) => {
@@ -173,6 +196,7 @@ export function OIDCCard() {
         loginButtonText: form.loginButtonText.trim(),
       });
       applySettings(data);
+      notifyOIDCChanged("settings-card");
       message.success(t("OIDC 配置已保存"));
     } catch (error) {
       message.error(apiMessage(error) || t("OIDC 配置保存失败"));
@@ -199,6 +223,7 @@ export function OIDCCard() {
       await deleteOIDCBinding();
       message.success(t("OIDC 绑定已解除"));
       applySettings(await getOIDCSettings());
+      notifyOIDCChanged("settings-card");
     } catch (error) {
       message.error(apiMessage(error) || t("解绑 OIDC 用户失败"));
     } finally {

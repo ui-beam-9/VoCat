@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRightRegular, LockClosedRegular, PersonRegular } from "@fluentui/react-icons";
 import { useAuth } from "../store/auth";
@@ -6,14 +6,16 @@ import { useI18n } from "../lib/i18n";
 import { message } from "../components/ui/message";
 import { BrandLogo } from "../components/shell/BrandLogo";
 import { OIDCIcon } from "../components/ui/OIDCIcon";
-import { getOIDCStatus } from "../api";
+import { OIDCFlowDialog } from "../components/shell/OIDCFlowDialog";
+import { getOIDCStatus, startOIDCLogin } from "../api";
+import { OIDC_LOGIN_POPUP_NAME, openOIDCPopup } from "../lib/oidcPopup";
 import type { OIDCStatus } from "../types";
 
 const INPUT_CLASS =
   "w-full rounded-lg border border-gray-200 bg-white/70 py-3 pl-10 pr-4 font-mono text-sm text-gray-900 placeholder-gray-400 outline-none transition-all focus:border-indigo-500/40 focus:ring-2 focus:ring-indigo-500/25 dark:border-white/10 dark:bg-black/20 dark:text-gray-100 dark:placeholder-gray-500";
 
 export default function LoginPage() {
-  const { login } = useAuth();
+  const { login, refresh } = useAuth();
   const { t } = useI18n();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -21,29 +23,57 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [working, setWorking] = useState(false);
   const [oidcStatus, setOIDCStatus] = useState<OIDCStatus | null>(null);
+  const [oidcDialogOpen, setOIDCDialogOpen] = useState(false);
+  const [oidcPopup, setOIDCPopup] = useState<Window | null>(null);
 
   // 登录页未登录也要能渲染：OIDC 状态加载失败时静默忽略，只保留密码登录。
-  useEffect(() => {
-    let active = true;
-    getOIDCStatus()
-      .then((status) => {
-        if (active) setOIDCStatus(status);
-      })
-      .catch(() => {
-        // 静默忽略：例如后端尚未部署 OIDC 接口。
-      });
-    return () => {
-      active = false;
-    };
+  const refreshOIDCStatus = useCallback(async () => {
+    try {
+      setOIDCStatus(await getOIDCStatus());
+    } catch {
+      // 静默忽略：例如后端尚未部署 OIDC 接口。
+    }
   }, []);
+
+  useEffect(() => {
+    void refreshOIDCStatus();
+    // 在其它标签页完成绑定/修改配置后，回到登录页无需手动刷新即可看到最新状态。
+    const onFocus = () => {
+      void refreshOIDCStatus();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") void refreshOIDCStatus();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [refreshOIDCStatus]);
 
   const currentRedirect = searchParams.get("redirect") || "/";
 
-  // 跳转后端 OIDC 登录入口，登录成功后由后端 302 回当前 redirect。
+  // 登录页 OIDC 登录：在点击手势内同步打开居中授权窗口，再由弹窗写入一次性授权地址。
   function oidcLogin() {
-    if (!oidcStatus?.loginUrl) return;
-    window.location.href = `${oidcStatus.loginUrl}?redirect=${encodeURIComponent(currentRedirect)}`;
+    if (!oidcStatus?.enabled) return;
+    setOIDCPopup(openOIDCPopup(OIDC_LOGIN_POPUP_NAME));
+    setOIDCDialogOpen(true);
   }
+
+  const openLoginPopup = useCallback(() => openOIDCPopup(OIDC_LOGIN_POPUP_NAME), []);
+
+  // 取一次性授权地址：保持函数身份稳定，避免 OIDCFlowDialog 的发起 effect 反复触发。
+  const startLoginPopup = useCallback(
+    async () => (await startOIDCLogin(currentRedirect)).authorizationUrl,
+    [currentRedirect],
+  );
+
+  // 弹窗授权成功后：刷新会话（LoginLayout 会按 ?redirect= 自动跳转），再补一次显式跳转兜底。
+  const onOIDCLoggedIn = useCallback(async () => {
+    await refresh();
+    navigate(currentRedirect, { replace: true });
+  }, [currentRedirect, navigate, refresh]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -124,7 +154,8 @@ export default function LoginPage() {
               {!working && <ArrowRightRegular className="h-5 w-5" />}
             </button>
           </form>
-          {oidcStatus?.enabled && oidcStatus.bound && oidcStatus.loginUrl && (
+          {/* 只要 OIDC 已启用就显示入口；未绑定账号在弹窗内会得到「未绑定」提示。 */}
+          {oidcStatus?.enabled && (
             <div className="relative z-10 mt-6">
               <div className="mb-4 flex items-center gap-3 text-xs text-gray-400 dark:text-gray-500">
                 <span className="h-px flex-1 bg-gray-200 dark:bg-white/10" />
@@ -146,6 +177,18 @@ export default function LoginPage() {
           <p className="text-xs text-gray-500">vocat © 2026</p>
         </div>
       </div>
+      <OIDCFlowDialog
+        open={oidcDialogOpen}
+        onClose={() => setOIDCDialogOpen(false)}
+        popup={oidcPopup}
+        onOpenPopup={openLoginPopup}
+        start={startLoginPopup}
+        successEvent="vocat:oidc-login"
+        successMessage={t("OIDC 登录成功")}
+        errorFallback={t("OIDC 登录失败")}
+        onSuccess={onOIDCLoggedIn}
+        title={t("OIDC 登录")}
+      />
     </div>
   );
 }
