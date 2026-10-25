@@ -2,6 +2,11 @@ import type {
   ApiErrorBody,
   LoggingSettings,
   LoginResponse,
+  OIDCBindStart,
+  OIDCBindingState,
+  OIDCDiscovery,
+  OIDCSettings,
+  OIDCStatus,
   SecuritySettings,
   Session,
 } from "./types";
@@ -215,6 +220,48 @@ export function updateLoggingSettings(settings: {
   level: LoggingSettings["level"];
 }) {
   return api<LoggingSettings>("/settings/logging", { method: "PUT", body: settings });
+}
+
+// ---- OIDC 单点登录 ----
+
+// 系统设置里的 OIDC 配置（clientSecret 为脱敏值）。
+export function getOIDCSettings() {
+  return api<OIDCSettings>("/settings/oidc");
+}
+
+export function updateOIDCSettings(input: {
+  enabled: boolean;
+  wellKnownUrl: string;
+  clientId: string;
+  clientSecret: string;
+  scopes: string[];
+  callbackUrls: string[];
+  loginButtonText: string;
+}) {
+  return api<OIDCSettings>("/settings/oidc", { method: "PUT", body: input });
+}
+
+// 只做 Well-known 预检，用于表单自动填充（不落库）。
+export function discoverOIDC(wellKnownUrl: string) {
+  return api<OIDCDiscovery>("/settings/oidc/discover", { method: "POST", body: { wellKnownUrl } });
+}
+
+// 登录页读取的公开状态（无需鉴权）。
+export function getOIDCStatus() {
+  return api<OIDCStatus>("/auth/oidc/status");
+}
+
+export function getOIDCBinding() {
+  return api<OIDCBindingState>("/settings/oidc/binding");
+}
+
+// 发起绑定：返回 OIDC 授权地址，供绑定弹窗内 iframe 加载。
+export function startOIDCBinding() {
+  return api<OIDCBindStart>("/settings/oidc/binding", { method: "POST", body: {} });
+}
+
+export function deleteOIDCBinding() {
+  return api<{ bound: boolean }>("/settings/oidc/binding", { method: "DELETE" });
 }
 
 export function apiMessage(error: unknown) {

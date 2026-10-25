@@ -35,6 +35,7 @@ import { VoWiFiMTUCard } from "../components/settings/VoWiFiMTUCard";
 import { VoiceGatewayCard } from "../components/settings/VoiceGatewayCard";
 import { PhoneInfoCard } from "../components/settings/PhoneInfoCard";
 import { RingtoneCard } from "../components/settings/RingtoneCard";
+import { OIDCCard } from "../components/settings/OIDCCard";
 
 const EMPTY_PASSWORD: PasswordForm = { oldPassword: "", newPassword: "", confirmPassword: "" };
 
@@ -526,6 +527,7 @@ export default function SettingsPage() {
         <VoWiFiMTUCard />
         <PhoneInfoCard />
         <RingtoneCard />
+        <OIDCCard />
         <VoiceGatewayCard />
         <SMSAutoClearCard
           enabled={smsAutoClear}

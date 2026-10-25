@@ -154,7 +154,14 @@ func (s *Service) Login(ctx context.Context, username string, password string) (
 	if comparePassword(admin.PasswordHash, password) != nil {
 		return Credentials{}, ErrInvalidCredentials
 	}
+	// 密码校验通过后与 OIDC 登录完全复用同一套会话签发逻辑。
+	return s.IssueSession(ctx, admin)
+}
 
+// IssueSession 在不校验密码的前提下，为已确认身份的管理员签发会话。
+// OIDC 登录成功后调用；内部逻辑与 Login 成功后完全一致
+// （随机 session/CSRF、删除过期会话、写 sessions 表）。
+func (s *Service) IssueSession(ctx context.Context, admin store.Admin) (Credentials, error) {
 	if err := s.store.DeleteExpiredSessions(ctx, time.Now()); err != nil {
 		return Credentials{}, err
 	}

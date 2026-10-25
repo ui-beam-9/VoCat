@@ -532,6 +532,66 @@ export interface DeveloperSettings {
   autoClearModemStorage?: boolean;
 }
 
+// OIDC 单点登录：Well-known 自动发现到的端点信息。
+export interface OIDCDiscovery {
+  issuer: string;
+  authorizationEndpoint: string;
+  tokenEndpoint: string;
+  userinfoEndpoint?: string;
+  endSessionEndpoint?: string;
+  jwksUri?: string;
+  scopesSupported?: string[];
+  error?: string;
+}
+
+// 管理员账号与 OIDC 身份（issuer + subject）的一对一绑定关系。
+export interface OIDCBinding {
+  issuer: string;
+  subject: string;
+  email: string;
+  name: string;
+  boundAt: string;
+}
+
+// 系统设置里的 OIDC 配置（clientSecret 返回时为脱敏值）。
+export interface OIDCSettings {
+  enabled: boolean;
+  wellKnownUrl: string;
+  clientId: string;
+  clientSecret: string;
+  scopes: string[];
+  callbackUrls: string[];
+  loginButtonText: string;
+  callbackPath: string;
+  defaultScopes: string[];
+  defaultLoginButtonText: string;
+  configured: boolean;
+  discovery: OIDCDiscovery | null;
+  binding: OIDCBinding | null;
+}
+
+// 登录页读取的公开状态：是否显示 OIDC 登录按钮及按钮文案。
+export interface OIDCStatus {
+  enabled: boolean;
+  bound: boolean;
+  loginButtonText: string;
+  loginUrl: string;
+}
+
+// 发起绑定后拿到的授权地址，用于弹窗内 iframe 加载。
+export interface OIDCBindStart {
+  authorizationUrl: string;
+  mode: string;
+}
+
+// 左下角用户菜单需要的绑定状态。
+export interface OIDCBindingState {
+  enabled: boolean;
+  bound: boolean;
+  binding: OIDCBinding | null;
+  loginButtonText: string;
+}
+
 export type Notice = {
   kind: "success" | "error" | "warning" | "info";
   title: string;

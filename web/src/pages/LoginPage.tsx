@@ -1,10 +1,13 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRightRegular, LockClosedRegular, PersonRegular } from "@fluentui/react-icons";
 import { useAuth } from "../store/auth";
 import { useI18n } from "../lib/i18n";
 import { message } from "../components/ui/message";
 import { BrandLogo } from "../components/shell/BrandLogo";
+import { OIDCIcon } from "../components/ui/OIDCIcon";
+import { getOIDCStatus } from "../api";
+import type { OIDCStatus } from "../types";
 
 const INPUT_CLASS =
   "w-full rounded-lg border border-gray-200 bg-white/70 py-3 pl-10 pr-4 font-mono text-sm text-gray-900 placeholder-gray-400 outline-none transition-all focus:border-indigo-500/40 focus:ring-2 focus:ring-indigo-500/25 dark:border-white/10 dark:bg-black/20 dark:text-gray-100 dark:placeholder-gray-500";
@@ -17,6 +20,30 @@ export default function LoginPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [working, setWorking] = useState(false);
+  const [oidcStatus, setOIDCStatus] = useState<OIDCStatus | null>(null);
+
+  // 登录页未登录也要能渲染：OIDC 状态加载失败时静默忽略，只保留密码登录。
+  useEffect(() => {
+    let active = true;
+    getOIDCStatus()
+      .then((status) => {
+        if (active) setOIDCStatus(status);
+      })
+      .catch(() => {
+        // 静默忽略：例如后端尚未部署 OIDC 接口。
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const currentRedirect = searchParams.get("redirect") || "/";
+
+  // 跳转后端 OIDC 登录入口，登录成功后由后端 302 回当前 redirect。
+  function oidcLogin() {
+    if (!oidcStatus?.loginUrl) return;
+    window.location.href = `${oidcStatus.loginUrl}?redirect=${encodeURIComponent(currentRedirect)}`;
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -97,6 +124,23 @@ export default function LoginPage() {
               {!working && <ArrowRightRegular className="h-5 w-5" />}
             </button>
           </form>
+          {oidcStatus?.enabled && oidcStatus.bound && oidcStatus.loginUrl && (
+            <div className="relative z-10 mt-6">
+              <div className="mb-4 flex items-center gap-3 text-xs text-gray-400 dark:text-gray-500">
+                <span className="h-px flex-1 bg-gray-200 dark:bg-white/10" />
+                <span>{t("或")}</span>
+                <span className="h-px flex-1 bg-gray-200 dark:bg-white/10" />
+              </div>
+              <button
+                type="button"
+                onClick={oidcLogin}
+                className="flex w-full items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white/70 px-4 py-3 text-sm font-semibold text-gray-700 shadow-sm transition-all duration-200 hover:border-indigo-400 hover:text-indigo-600 active:scale-95 dark:border-white/10 dark:bg-black/20 dark:text-gray-200 dark:hover:border-indigo-400/60 dark:hover:text-indigo-300"
+              >
+                <OIDCIcon className="h-5 w-5" />
+                <span>{oidcStatus.loginButtonText || t("OIDC 登录")}</span>
+              </button>
+            </div>
+          )}
         </div>
         <div className="mt-6 text-center">
           <p className="text-xs text-gray-500">vocat © 2026</p>

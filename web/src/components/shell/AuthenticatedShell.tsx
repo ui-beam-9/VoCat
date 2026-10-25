@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   BoardRegular,
@@ -16,17 +16,26 @@ import {
 import { useAuth } from "../../store/auth";
 import { useI18n } from "../../lib/i18n";
 import { confirmDialog } from "../ui/MessageBox";
+import { message } from "../ui/message";
 import { LanguageSwitch } from "../ui/LanguageSwitch";
 import { SwitchDark } from "../ui/SwitchDark";
 import { Drawer } from "../ui/Drawer";
 import { ErrorBoundary } from "../ui/ErrorBoundary";
+import { OIDCIcon } from "../ui/OIDCIcon";
 import { cx } from "../../lib/utils";
 import { BrandLogo } from "./BrandLogo";
+import { OIDCBindDialog } from "./OIDCBindDialog";
 import { VersionBadge } from "./VersionBadge";
 import { IncomingCallWatcher } from "../IncomingCallWatcher";
 import { listPlugins, type InstalledPlugin } from "../../extensions";
-import { api } from "../../api";
-import type { SystemInfo } from "../../types";
+import { api, apiMessage, deleteOIDCBinding, getOIDCStatus } from "../../api";
+import type { OIDCStatus, SystemInfo } from "../../types";
+
+// 用户菜单项样式：普通项与退出项（退出项使用红色悬停语义）。
+const USER_MENU_ITEM_CLASS =
+  "flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-60 dark:text-gray-200 dark:hover:bg-white/10";
+const USER_MENU_LOGOUT_CLASS =
+  "flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-red-500 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:text-red-400 dark:hover:bg-red-500/10";
 
 const NAV = [
   { to: "/", label: "仪表盘", icon: BoardRegular, end: true },
@@ -51,10 +60,52 @@ export function AuthenticatedShell({
   const [mobileOpen, setMobileOpen] = useState(false);
   const [plugins, setPlugins] = useState<InstalledPlugin[]>([]);
   const [developer, setDeveloper] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [bindDialogOpen, setBindDialogOpen] = useState(false);
+  const [oidcStatus, setOIDCStatus] = useState<OIDCStatus | null>(null);
+  const [oidcBusy, setOIDCBusy] = useState(false);
+  const userMenuRef = useRef<HTMLDivElement>(null);
   const { logout, user } = useAuth();
   const { t, lang } = useI18n();
   const navigate = useNavigate();
   const location = useLocation();
+
+  // 登录后加载一次 OIDC 状态：只在已启用且配置完整时显示绑定/解绑入口。
+  const loadOIDCStatus = useCallback(async () => {
+    try {
+      setOIDCStatus(await getOIDCStatus());
+    } catch {
+      // 接口不可用或未启用时静默忽略，不影响侧栏其它功能。
+      setOIDCStatus(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadOIDCStatus();
+  }, [loadOIDCStatus]);
+
+  const closeBindDialog = useCallback(() => setBindDialogOpen(false), []);
+  const onBoundOIDC = useCallback(() => {
+    void loadOIDCStatus();
+  }, [loadOIDCStatus]);
+
+  // 点击菜单外部或按 Esc 关闭用户菜单。
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    function onPointerDown(event: MouseEvent) {
+      if (userMenuRef.current?.contains(event.target as Node)) return;
+      setUserMenuOpen(false);
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setUserMenuOpen(false);
+    }
+    document.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [userMenuOpen]);
 
   useEffect(() => {
     let active = true;
@@ -70,9 +121,14 @@ export function AuthenticatedShell({
 
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 767px)");
+    let last = mq.matches;
     const update = () => {
-      setIsMobile(mq.matches);
-      if (!mq.matches) setMobileOpen(false);
+      const next = mq.matches;
+      setIsMobile(next);
+      // 桌面/移动断点切换时关掉用户菜单，避免状态残留导致菜单自己展开。
+      if (next !== last) setUserMenuOpen(false);
+      last = next;
+      if (!next) setMobileOpen(false);
     };
     update();
     window.addEventListener("resize", update, { passive: true });
@@ -91,6 +147,7 @@ export function AuthenticatedShell({
 
   useEffect(() => {
     setMobileOpen(false);
+    setUserMenuOpen(false);
   }, [location.pathname]);
 
   async function onLogout() {
@@ -102,6 +159,32 @@ export function AuthenticatedShell({
     if (ok) {
       await logout();
       navigate("/login");
+    }
+  }
+
+  function openBindDialog() {
+    setUserMenuOpen(false);
+    setBindDialogOpen(true);
+  }
+
+  // 解绑前二次确认，失败时提示后端返回的原因。
+  async function onUnbindOIDC() {
+    setUserMenuOpen(false);
+    const ok = await confirmDialog(
+      t("解绑后将无法使用该 OIDC 身份登录，确定继续吗？"),
+      t("解绑 OIDC 用户"),
+      { confirmText: t("解绑"), cancelText: t("取消"), confirmVariant: "danger" },
+    );
+    if (!ok) return;
+    setOIDCBusy(true);
+    try {
+      await deleteOIDCBinding();
+      message.success(t("OIDC 用户已解绑"));
+    } catch (error) {
+      message.error(apiMessage(error) || t("解绑 OIDC 用户失败"));
+    } finally {
+      setOIDCBusy(false);
+      void loadOIDCStatus();
     }
   }
 
@@ -158,24 +241,90 @@ export function AuthenticatedShell({
     );
   }
 
-  function userCard() {
+  // 用户菜单：绑定/解绑 OIDC 仅在 OIDC 已启用时出现，退出登录沿用原有确认逻辑。
+  function userMenu(compact: boolean) {
+    const showOIDC = !!oidcStatus?.enabled;
     return (
-      <div className="ui-panel-muted flex items-center gap-3 p-3">
-        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 dark:bg-indigo-500/10 dark:text-indigo-300">
-          <SettingsRegular className="h-[18px] w-[18px]" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-bold">{user?.username || "Admin"}</div>
-          <div className="truncate text-xs text-gray-400">{user?.role || "Administrator"}</div>
-        </div>
+      <div
+        role="menu"
+        aria-label={t("账号操作")}
+        className={cx(
+          "absolute bottom-full z-20 mb-2 w-52 rounded-xl border border-gray-200/70 bg-white/95 p-1 shadow-xl backdrop-blur-xl dark:border-white/10 dark:bg-[#1c1c22]/95",
+          compact ? "left-0" : "right-0",
+        )}
+      >
+        {showOIDC && (
+          <>
+            {oidcStatus?.bound ? (
+              <button
+                type="button"
+                role="menuitem"
+                disabled={oidcBusy}
+                onClick={() => { void onUnbindOIDC(); }}
+                className={USER_MENU_ITEM_CLASS}
+              >
+                <OIDCIcon className="h-4 w-4 shrink-0" />
+                <span>{oidcBusy ? t("正在解绑...") : t("解绑 OIDC 用户")}</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={openBindDialog}
+                className={USER_MENU_ITEM_CLASS}
+              >
+                <OIDCIcon className="h-4 w-4 shrink-0" />
+                <span>{t("绑定 OIDC 用户")}</span>
+              </button>
+            )}
+            <div role="separator" className="my-1 h-px bg-gray-100 dark:bg-white/10" />
+          </>
+        )}
         <button
           type="button"
-          onClick={onLogout}
-          aria-label={t("退出登录")}
-          className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10"
+          role="menuitem"
+          onClick={() => { setUserMenuOpen(false); void onLogout(); }}
+          className={USER_MENU_LOGOUT_CLASS}
         >
-          <SignOutRegular className="h-[18px] w-[18px]" />
+          <SignOutRegular className="h-[18px] w-[18px] shrink-0" />
+          <span>{t("退出登录")}</span>
         </button>
+      </div>
+    );
+  }
+
+  // 左下角用户卡片：齿轮按钮唤出菜单；collapse 时只渲染紧凑齿轮入口。
+  function userCard(compact = false) {
+    return (
+      <div
+        ref={userMenuRef}
+        className={cx(
+          "relative",
+          compact
+            ? "flex justify-center"
+            : "ui-panel-muted flex items-center gap-3 p-3",
+        )}
+      >
+        <button
+          type="button"
+          onClick={() => setUserMenuOpen((value) => !value)}
+          aria-label={t("账号操作")}
+          aria-haspopup="menu"
+          aria-expanded={userMenuOpen}
+          className={cx(
+            "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 transition-colors hover:bg-indigo-100 dark:bg-indigo-500/10 dark:text-indigo-300 dark:hover:bg-indigo-500/20",
+            userMenuOpen && "ring-2 ring-indigo-500/40",
+          )}
+        >
+          <SettingsRegular className="h-[18px] w-[18px]" />
+        </button>
+        {!compact && (
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-bold">{user?.username || "Admin"}</div>
+            <div className="truncate text-xs text-gray-400">{user?.role || "Administrator"}</div>
+          </div>
+        )}
+        {userMenuOpen && userMenu(compact)}
       </div>
     );
   }
@@ -199,7 +348,10 @@ export function AuthenticatedShell({
             )}
           </div>
           {menuList(collapsed)}
-          {!collapsed && <div className="absolute bottom-4 w-full px-3">{userCard()}</div>}
+          {/* 折叠态仍渲染紧凑齿轮入口，保证用户菜单可用。 */}
+          <div className={cx("absolute bottom-4 w-full", collapsed ? "px-1.5" : "px-3")}>
+            {userCard(collapsed)}
+          </div>
         </aside>
       )}
 
@@ -248,6 +400,11 @@ export function AuthenticatedShell({
         </main>
       </div>
       <IncomingCallWatcher />
+      <OIDCBindDialog
+        open={bindDialogOpen}
+        onClose={closeBindDialog}
+        onBound={onBoundOIDC}
+      />
     </div>
   );
 }

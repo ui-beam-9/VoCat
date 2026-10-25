@@ -185,3 +185,58 @@ func TestEnsureAdminIfMissingDoesNotOverwriteChangedPassword(t *testing.T) {
 		t.Fatalf("stale configured password became active: %v", err)
 	}
 }
+
+func TestIssueSessionCreatesUsableSessionWithoutPassword(t *testing.T) {
+	ctx := context.Background()
+	service := newTestService(t)
+	admin, err := service.store.CurrentAdmin(ctx)
+	if err != nil {
+		t.Fatalf("CurrentAdmin() error = %v", err)
+	}
+
+	before := time.Now().UTC()
+	credentials, err := service.IssueSession(ctx, admin)
+	if err != nil {
+		t.Fatalf("IssueSession() error = %v", err)
+	}
+	if credentials.SessionToken == "" || credentials.CSRFToken == "" {
+		t.Fatalf("IssueSession() 未颁发令牌: %+v", credentials)
+	}
+	if credentials.Principal.ID != admin.ID || credentials.Principal.Username != admin.Username {
+		t.Fatalf("Principal = %+v, want admin %d/%s", credentials.Principal, admin.ID, admin.Username)
+	}
+	if !credentials.ExpiresAt.After(before) {
+		t.Fatalf("ExpiresAt = %v, 未晚于签发时间 %v", credentials.ExpiresAt, before)
+	}
+	if _, err := service.Authenticate(ctx, credentials.SessionToken); err != nil {
+		t.Fatalf("Authenticate() error = %v", err)
+	}
+	if _, err := service.ValidateCSRF(ctx, credentials.SessionToken, credentials.CSRFToken); err != nil {
+		t.Fatalf("ValidateCSRF() error = %v", err)
+	}
+}
+
+func TestIssueSessionIssuesDistinctSessions(t *testing.T) {
+	ctx := context.Background()
+	service := newTestService(t)
+	admin, err := service.store.CurrentAdmin(ctx)
+	if err != nil {
+		t.Fatalf("CurrentAdmin() error = %v", err)
+	}
+	first, err := service.IssueSession(ctx, admin)
+	if err != nil {
+		t.Fatalf("IssueSession() error = %v", err)
+	}
+	second, err := service.IssueSession(ctx, admin)
+	if err != nil {
+		t.Fatalf("IssueSession() error = %v", err)
+	}
+	if first.SessionToken == second.SessionToken || first.CSRFToken == second.CSRFToken {
+		t.Fatal("IssueSession() 重复颁发了相同令牌")
+	}
+	for index, credentials := range []Credentials{first, second} {
+		if _, err := service.Authenticate(ctx, credentials.SessionToken); err != nil {
+			t.Fatalf("第 %d 个会话认证失败: %v", index+1, err)
+		}
+	}
+}

@@ -23,6 +23,7 @@ import (
 	"vocat/internal/extensions"
 	"vocat/internal/httpsmode"
 	"vocat/internal/loghub"
+	"vocat/internal/oidc"
 	"vocat/internal/sipgw"
 	"vocat/internal/store"
 	"vocat/internal/update"
@@ -54,7 +55,7 @@ type Options struct {
 	UpdateToken         string
 	HTTPS               *httpsmode.Manager
 	// RingtoneFile 为自定义来电铃声文件的存储路径（数据目录下固定文件名）。
-	RingtoneFile        string
+	RingtoneFile string
 }
 
 // Server is the single HTTP handler for the JSON API and embedded SPA.
@@ -108,6 +109,16 @@ type Server struct {
 	phoneInfoAPIKey           string
 	phoneInfoCache            map[string]phoneInfoCacheEntry
 	ringtoneFile              string
+	// OIDC 登录/绑定：内存缓存配置、已发现端点、绑定关系与待处理授权状态。
+	oidcMu             sync.RWMutex
+	oidcConfig         oidc.Config
+	oidcMetadata       oidc.Metadata
+	oidcDiscovered     bool
+	oidcDiscoveryError string
+	oidcBinding        oidc.Binding
+	oidcBound          bool
+	oidcPending        map[string]oidcPendingState
+	oidcHTTPClient     *http.Client
 }
 
 func New(options Options) (*Server, error) {
@@ -167,12 +178,15 @@ func New(options Options) (*Server, error) {
 		updateApply:         update.ApplyLatest,
 		updateRestart:       update.RestartService,
 		phoneInfoCache:      make(map[string]phoneInfoCacheEntry),
+		oidcPending:         make(map[string]oidcPendingState),
+		oidcHTTPClient:      newOIDCHTTPClient(),
 	}
 	server.cellularDataRuntime()
 	server.loadAccessConfig(context.Background())
 	server.loadUILanguage(context.Background())
 	server.loadPhoneInfoAPIKey(context.Background())
 	server.loadLoggingConfig(context.Background())
+	server.loadOIDCConfig(context.Background())
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", server.handleLiveness)
@@ -182,6 +196,11 @@ func New(options Options) (*Server, error) {
 	mux.HandleFunc("/api/auth/login", server.handleLogin)
 	mux.HandleFunc("/api/auth/session", server.handleSession)
 	mux.HandleFunc("/api/auth/logout", server.handleLogout)
+	// OIDC 公开接口：登录页与绑定弹窗在未登录/无会话 Cookie 场景下也要能访问，
+	// 因此必须绕过 requireAuthenticated 直接注册在 mux 上。
+	mux.HandleFunc("/api/auth/oidc/status", server.handleOIDCStatus)
+	mux.HandleFunc("/api/auth/oidc/login", server.handleOIDCLogin)
+	mux.HandleFunc("/api/auth/oidc/callback", server.handleOIDCCallback)
 	mux.HandleFunc("/api", server.handleAPI)
 	mux.HandleFunc("/api/", server.handleAPI)
 	mux.HandleFunc("/websheets/", server.handleWebsheet)
@@ -688,6 +707,17 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 					"script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; "+
 					"img-src 'self' data:; connect-src 'self'",
 			)
+		} else if r.URL.Path == oidcCallbackResultPath {
+			// OIDC 绑定弹窗用同源 iframe 加载授权页，回调结果页也必须允许同源嵌入；
+			// 结果页内联脚本负责 postMessage 通知父窗口。
+			w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+			w.Header().Set(
+				"Content-Security-Policy",
+				"default-src 'self'; base-uri 'self'; frame-ancestors 'self'; "+
+					"object-src 'none'; form-action 'self'; "+
+					"script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; "+
+					"img-src 'self' data:; connect-src 'self'",
+			)
 		} else {
 			w.Header().Set("X-Frame-Options", "DENY")
 			w.Header().Set(
@@ -695,7 +725,9 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 				"default-src 'self'; base-uri 'self'; frame-ancestors 'none'; "+
 					"object-src 'none'; form-action 'self'; "+
 					"script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; "+
-					"img-src 'self' data:; connect-src 'self'",
+					"img-src 'self' data:; connect-src 'self'; "+
+					// 绑定弹窗需要 iframe 加载 IDP 授权页：放行已缓存授权端点 origin（不可解析时退回 'self'）。
+					"frame-src "+s.oidcFrameSources(),
 			)
 		}
 		if s.secureCookies && s.https == nil {

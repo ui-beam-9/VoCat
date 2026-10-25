@@ -110,6 +110,15 @@ func (s *Server) routeSettingsAPI(
 	case "settings/phone-info":
 		s.handlePhoneInfoSettings(w, r)
 		return true
+	case "settings/oidc":
+		s.handleOIDCSettings(w, r)
+		return true
+	case "settings/oidc/discover":
+		s.handleOIDCDiscover(w, r)
+		return true
+	case "settings/oidc/binding":
+		s.handleOIDCBinding(w, r)
+		return true
 	}
 	segments := splitAPIPath(cleanPath)
 	if len(segments) == 4 &&
