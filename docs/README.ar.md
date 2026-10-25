@@ -211,7 +211,7 @@ docker run -d \
 | `VOCAT_SECURE_COOKIES` | `false` | يضع علامة آمنة على ملفات تعريف ارتباط الجلسة عند استخدام HTTPS. |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | مهلة الإيقاف السلس. |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | الحد الأقصى لحجم جسم طلب API. |
-| `VOCAT_REPO` | `MengMengCode/VoCat` | مستودع GitHub الموثوق الذي يستخدمه المحدّث الذاتي، بصيغة `owner/name`. |
+| `VOCAT_REPO` | `ui-beam-9/VoCat` | مستودع GitHub الموثوق الذي يستخدمه المحدّث الذاتي، بصيغة `owner/name`. |
 | `GITHUB_TOKEN` | فارغ | رمز GitHub اختياري للمستودعات الخاصة أو حدود API أعلى. |
 
 يمكن تحويل حزم إعدادات مشغّلي Apple التي يوفّرها المستخدم باستخدام `vocat carrier import-ipcc` إلى ملفات إعداد مشغّلين قابلة للمراجعة ومقيّدة بقائمة عناصر مسموح بها؛ انظر [docs/CARRIER_IPCC_IMPORT.md](CARRIER_IPCC_IMPORT.md).
@@ -239,13 +239,13 @@ docker run -d \
 تحقق من وجود GitHub Release أحدث:
 
 ```bash
-vocat update --check --repo MengMengCode/VoCat
+vocat update --check --repo ui-beam-9/VoCat
 ```
 
 ثبّت أحدث إصدار:
 
 ```bash
-sudo vocat update --repo MengMengCode/VoCat
+sudo vocat update --repo ui-beam-9/VoCat
 ```
 
 ينزّل المحدّث الملف الثنائي المطابق لبنية Linux الحالية، ويتحقق منه باستخدام `SHA256SUMS` المنشور، ويستبدل الملف التنفيذي بشكل ذري، ويعيد تشغيل خدمة systemd `vocat` عند توفرها.

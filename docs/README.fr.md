@@ -211,7 +211,7 @@ Vocat lit un fichier de configuration JSON optionnel depuis `VOCAT_CONFIG`, puis
 | `VOCAT_SECURE_COOKIES` | `false` | Marque les cookies de session comme sécurisés lorsque HTTPS est utilisé. |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | Délai d'arrêt gracieux. |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | Taille maximale du corps de requête API. |
-| `VOCAT_REPO` | `MengMengCode/VoCat` | Dépôt GitHub de confiance utilisé par l'auto-updater, au format `owner/name`. |
+| `VOCAT_REPO` | `ui-beam-9/VoCat` | Dépôt GitHub de confiance utilisé par l'auto-updater, au format `owner/name`. |
 | `GITHUB_TOKEN` | vide | Jeton GitHub optionnel pour les dépôts privés ou des limites d'API plus élevées. |
 
 Les bundles opérateur Apple fournis par l'utilisateur peuvent être convertis avec `vocat carrier import-ipcc` en profils opérateur vérifiables et limités à une liste d'éléments autorisés ; voir [docs/CARRIER_IPCC_IMPORT.md](CARRIER_IPCC_IMPORT.md).
@@ -239,13 +239,13 @@ La commutation de profil et l'envoi de SMS utilisent des boutons de confirmation
 Vérifier l'existence d'une GitHub Release plus récente :
 
 ```bash
-vocat update --check --repo MengMengCode/VoCat
+vocat update --check --repo ui-beam-9/VoCat
 ```
 
 Installer la dernière version :
 
 ```bash
-sudo vocat update --repo MengMengCode/VoCat
+sudo vocat update --repo ui-beam-9/VoCat
 ```
 
 L'updater télécharge le binaire correspondant à l'architecture Linux actuelle, le vérifie avec le `SHA256SUMS` publié, remplace l'exécutable de manière atomique et redémarre le service systemd `vocat` lorsqu'il est disponible.

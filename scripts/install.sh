@@ -24,7 +24,7 @@ set -euo pipefail
 # --- Publisher configuration -------------------------------------------------
 # Default GitHub repository in owner/name form. Publishers: set this to your
 # own repo, or override per-run with VOCAT_REPO.
-REPO="${VOCAT_REPO:-MengMengCode/VoCat}"
+REPO="${VOCAT_REPO:-ui-beam-9/VoCat}"
 
 INSTALL_DIR="/opt/vocat/bin"
 BINARY_PATH="${INSTALL_DIR}/vocat"

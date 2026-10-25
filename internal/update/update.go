@@ -429,7 +429,7 @@ Fetch the latest release from GitHub and replace this binary in place.
 Flags:
   --check            Report whether an update is available, then exit.
   --force            Reinstall even when already at the latest version.
-  --repo owner/name  GitHub repository (default: $VOCAT_REPO or MengMengCode/VoCat).
+  --repo owner/name  GitHub repository (default: $VOCAT_REPO or ui-beam-9/VoCat).
   --target path      Binary to replace (default: /opt/vocat/bin/vocat if
                      present, otherwise the running executable).
   --token token      GitHub bearer token (default: $GITHUB_TOKEN).

@@ -203,7 +203,7 @@ Vocat は `VOCAT_CONFIG` からオプションの JSON 設定ファイルを読�
 | `VOCAT_SECURE_COOKIES` | `false` | HTTPS 使用時にセッション Cookie をセキュアとしてマークします。 |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | グレースフルシャットダウンのタイムアウト。 |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | API リクエストボディの最大サイズ。 |
-| `VOCAT_REPO` | `MengMengCode/VoCat` | 自己更新機能が使用する信頼された GitHub リポジトリ(`owner/name` 形式)。 |
+| `VOCAT_REPO` | `ui-beam-9/VoCat` | 自己更新機能が使用する信頼された GitHub リポジトリ(`owner/name` 形式)。 |
 | `GITHUB_TOKEN` | 空 | プライベートリポジトリやより高い API レート制限のためのオプションの GitHub トークン。 |
 
 ユーザーが提供する Apple キャリアバンドルは、`vocat carrier import-ipcc` で、内容を確認可能で許可リストに準拠したキャリアプロファイルに変換できます。[docs/CARRIER_IPCC_IMPORT.md](CARRIER_IPCC_IMPORT.md) を参照してください。
@@ -231,13 +231,13 @@ Telegram 通知が有効で、Chat ID と Admin ID の両方が設定されて�
 より新しい GitHub Release を確認する:
 
 ```bash
-vocat update --check --repo MengMengCode/VoCat
+vocat update --check --repo ui-beam-9/VoCat
 ```
 
 最新リリースをインストールする:
 
 ```bash
-sudo vocat update --repo MengMengCode/VoCat
+sudo vocat update --repo ui-beam-9/VoCat
 ```
 
 アップデーターは、現在の Linux アーキテクチャに一致するバイナリをダウンロードし、公開された `SHA256SUMS` で検証し、実行ファイルをアトミックに置き換え、利用可能な場合は `vocat` systemd サービスを再起動します。

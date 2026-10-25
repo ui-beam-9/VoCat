@@ -257,7 +257,7 @@ Vocat reads an optional JSON configuration file from `VOCAT_CONFIG`, then applie
 | `VOCAT_SECURE_COOKIES` | `false` | Marks session cookies as secure when HTTPS is used. |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | Graceful shutdown timeout. |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | Maximum API request body size. |
-| `VOCAT_REPO` | `MengMengCode/VoCat` | Trusted GitHub repository used by the self-updater, in `owner/name` form. |
+| `VOCAT_REPO` | `ui-beam-9/VoCat` | Trusted GitHub repository used by the self-updater, in `owner/name` form. |
 | `GITHUB_TOKEN` | empty | Optional GitHub token for private repositories or higher API limits. |
 
 User-supplied Apple carrier bundles can be converted into reviewable,
@@ -296,13 +296,13 @@ USSI dialog handling follows [3GPP TS 24.390](https://www.etsi.org/deliver/etsi_
 Check for a newer GitHub Release:
 
 ```bash
-vocat update --check --repo MengMengCode/VoCat
+vocat update --check --repo ui-beam-9/VoCat
 ```
 
 Install the latest release:
 
 ```bash
-sudo vocat update --repo MengMengCode/VoCat
+sudo vocat update --repo ui-beam-9/VoCat
 ```
 
 The updater downloads the binary matching the current Linux architecture, verifies it with the published `SHA256SUMS`, replaces the executable atomically, and restarts the `vocat` systemd service when available.

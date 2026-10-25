@@ -211,7 +211,7 @@ Vocat читает необязательный JSON-файл конфигура
 | `VOCAT_SECURE_COOKIES` | `false` | Помечает cookie сессии как безопасные при использовании HTTPS. |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | Тайм-аут корректного завершения работы. |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | Максимальный размер тела запроса API. |
-| `VOCAT_REPO` | `MengMengCode/VoCat` | Доверенный репозиторий GitHub, используемый самообновлятором, в формате `owner/name`. |
+| `VOCAT_REPO` | `ui-beam-9/VoCat` | Доверенный репозиторий GitHub, используемый самообновлятором, в формате `owner/name`. |
 | `GITHUB_TOKEN` | пусто | Необязательный токен GitHub для приватных репозиториев или более высоких лимитов API. |
 
 Предоставленные пользователем пакеты настроек операторов Apple можно преобразовать командой `vocat carrier import-ipcc` в профили операторов, доступные для проверки и ограниченные списком разрешённых элементов; см. [docs/CARRIER_IPCC_IMPORT.md](CARRIER_IPCC_IMPORT.md).
@@ -239,13 +239,13 @@ Vocat читает необязательный JSON-файл конфигура
 Проверить наличие более нового GitHub Release:
 
 ```bash
-vocat update --check --repo MengMengCode/VoCat
+vocat update --check --repo ui-beam-9/VoCat
 ```
 
 Установить последний релиз:
 
 ```bash
-sudo vocat update --repo MengMengCode/VoCat
+sudo vocat update --repo ui-beam-9/VoCat
 ```
 
 Обновлятор загружает бинарный файл, соответствующий текущей архитектуре Linux, проверяет его по опубликованному `SHA256SUMS`, атомарно заменяет исполняемый файл и перезапускает сервис systemd `vocat`, когда он доступен.

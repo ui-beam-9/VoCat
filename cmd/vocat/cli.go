@@ -34,7 +34,7 @@ Usage:
   vocat update       Check GitHub for a newer release and self-update.
                      Flags:
                        --check           Only report whether an update is available.
-                       --repo owner/name GitHub repository (default: $VOCAT_REPO or MengMengCode/VoCat).
+                       --repo owner/name GitHub repository (default: $VOCAT_REPO or ui-beam-9/VoCat).
                        --target path     Binary to replace (default: running exe).
                        --force           Reinstall even at the same version.
                      Environment:

@@ -217,7 +217,7 @@ Vocat 先从 `VOCAT_CONFIG` 读取可选的 JSON 配置文件，再应用 `VOCAT
 | `VOCAT_SECURE_COOKIES` | `false` | 在使用 HTTPS 时将会话 Cookie 标记为安全。 |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | 优雅关闭超时时间。 |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | API 请求体最大字节数。 |
-| `VOCAT_REPO` | `MengMengCode/VoCat` | 自更新器使用的受信任 GitHub 仓库，格式为 `owner/name`。 |
+| `VOCAT_REPO` | `ui-beam-9/VoCat` | 自更新器使用的受信任 GitHub 仓库，格式为 `owner/name`。 |
 | `GITHUB_TOKEN` | 空 | 可选的 GitHub token，用于私有仓库或更高的 API 限额。 |
 
 用户提供的 Apple 运营商配置包可通过 `vocat carrier import-ipcc` 转换为可审查、符合允许列表的运营商配置文件；参见 [docs/CARRIER_IPCC_IMPORT.md](CARRIER_IPCC_IMPORT.md)。
@@ -252,13 +252,13 @@ USSI 会话处理遵循 [3GPP TS 24.390](https://www.etsi.org/deliver/etsi_ts/12
 检查是否有更新的 GitHub Release：
 
 ```bash
-vocat update --check --repo MengMengCode/VoCat
+vocat update --check --repo ui-beam-9/VoCat
 ```
 
 安装最新发布版：
 
 ```bash
-sudo vocat update --repo MengMengCode/VoCat
+sudo vocat update --repo ui-beam-9/VoCat
 ```
 
 更新器会下载与当前 Linux 架构匹配的二进制，使用已发布的 `SHA256SUMS` 进行校验，原子性地替换可执行文件，并在可用时重启 `vocat` systemd 服务。
