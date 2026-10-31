@@ -404,6 +404,8 @@ export const EN_DICT: Record<string, string> = {
   任务已加入设备队列: "Task added to the device queue",
   确定删除这个自动任务吗: "Delete this automatic task?",
   自动任务已删除: "Automatic task deleted",
+  "确定删除这条执行记录吗？": "Delete this run record?",
+  执行记录已删除: "Run record deleted",
   自动任务已更新: "Automatic task updated",
   自动任务已创建: "Automatic task created",
   编辑: "Edit",

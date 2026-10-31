@@ -758,6 +758,15 @@ func (s *Server) routeAutomaticTasksAPI(w http.ResponseWriter, r *http.Request, 
 		s.handleAutomaticTaskRuns(w, r)
 		return true
 	}
+	if len(segments) == 3 && segments[1] == "runs" {
+		runID, parseErr := strconv.ParseInt(segments[2], 10, 64)
+		if parseErr != nil || runID <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid_run_id", "automatic task run ID is invalid")
+			return true
+		}
+		s.handleAutomaticTaskRun(w, r, runID)
+		return true
+	}
 	id, err := strconv.ParseInt(segments[1], 10, 64)
 	if err != nil || id <= 0 {
 		writeError(w, http.StatusBadRequest, "invalid_task_id", "automatic task ID is invalid")
@@ -857,6 +866,24 @@ func (s *Server) handleAutomaticTaskRuns(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"runs": runs, "total": total}})
+}
+
+// handleAutomaticTaskRun 处理单条执行记录的删除。
+// 只允许删除已结束（成功/失败）的记录，排队中/执行中的记录由调度器持续更新，
+// 删除会造成状态不一致，因此返回 409。
+func (s *Server) handleAutomaticTaskRun(w http.ResponseWriter, r *http.Request, id int64) {
+	if !requireMethod(w, r, http.MethodDelete) {
+		return
+	}
+	if err := s.store.DeleteAutomaticTaskRun(r.Context(), id, !s.developerActive(r.Context())); err != nil {
+		if errors.Is(err, store.ErrAutomaticTaskRunActive) {
+			writeError(w, http.StatusConflict, "automatic_task_run_active", "queued or running run records cannot be deleted")
+			return
+		}
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"deleted": true}})
 }
 
 func (s *Server) handleAutomaticTaskRunNow(w http.ResponseWriter, r *http.Request, id int64) {

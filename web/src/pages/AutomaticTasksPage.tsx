@@ -160,6 +160,8 @@ export default function AutomaticTasksPage() {
   const [form, setForm] = useState<TaskForm>(() => emptyForm());
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(0);
+  // runBusy 记录正在删除的执行记录 ID，避免重复点击并显示按钮 loading。
+  const [runBusy, setRunBusy] = useState(0);
   // Refs mirror the runs page/pageSize so the 5s poll reloads the page the user
   // is actually looking at instead of snapping back to page 1 on every tick.
   const runsPageRef = useRef(1);
@@ -429,6 +431,20 @@ export default function AutomaticTasksPage() {
     }
   }
 
+  async function removeRun(run: AutomaticTaskRun) {
+    if (!await confirmDialog(t("确定删除这条执行记录吗？"), t("确认删除"), { type: "warning", confirmText: t("删除"), cancelText: t("取消") })) return;
+    setRunBusy(run.id);
+    try {
+      await api(`/automatic-tasks/runs/${run.id}`, { method: "DELETE" });
+      message.success(t("执行记录已删除"));
+      await reloadRuns();
+    } catch (error) {
+      message.error(apiMessage(error));
+    } finally {
+      setRunBusy(0);
+    }
+  }
+
   const taskTypeLabel = (value: TaskType) => ({ sms: t("发送短信"), call: t("拨打电话并自动挂断"), public_ip: t("获取漫游公网 IP"), cellular_attach: t("仅注册蜂窝网络") })[value];
   const environmentLabel = (value: TaskEnvironment) => value === "vowifi" ? "VoWiFi" : t("基站直连");
 	const selectedTaskDeviceIsReader = deviceByID.get(form.deviceId)?.deviceType === "usb_sim_reader";
@@ -511,11 +527,11 @@ export default function AutomaticTasksPage() {
       <div className="ui-card mt-5 overflow-hidden">
         <div className="border-b border-gray-100 px-5 py-4 dark:border-white/10"><h3 className="font-bold">{t("最近执行记录")}</h3></div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[800px] text-left text-sm">
-            <thead className="bg-gray-50/70 text-xs text-gray-500 dark:bg-white/[0.025]"><tr><th className="px-4 py-3">{t("任务")}</th><th className="px-4 py-3">{t("设备")}</th><th className="px-4 py-3">{t("状态")}</th><th className="px-4 py-3">{t("排队时间")}</th><th className="px-4 py-3">{t("尝试次数")}</th><th className="px-4 py-3">{t("结果")}</th></tr></thead>
+          <table className="w-full min-w-[880px] text-left text-sm">
+            <thead className="bg-gray-50/70 text-xs text-gray-500 dark:bg-white/[0.025]"><tr><th className="px-4 py-3">{t("任务")}</th><th className="px-4 py-3">{t("设备")}</th><th className="px-4 py-3">{t("状态")}</th><th className="px-4 py-3">{t("排队时间")}</th><th className="px-4 py-3">{t("尝试次数")}</th><th className="px-4 py-3">{t("结果")}</th><th className="px-4 py-3 text-right">{t("操作")}</th></tr></thead>
             <tbody className="divide-y divide-gray-100 dark:divide-white/10">
               {runs.map((run) => (
-                <tr key={run.id}><td className="px-4 py-3 font-medium">{taskByID.get(run.taskId)?.name || `#${run.taskId}`}</td><td className="px-4 py-3">{deviceByID.get(run.deviceId)?.name || run.deviceId}</td><td className="px-4 py-3"><Tag type={run.status === "success" ? "success" : run.status === "failed" ? "danger" : run.status === "running" ? "warning" : "info"}>{({ queued: t("排队中"), running: t("执行中"), success: t("成功"), failed: t("失败") })[run.status]}</Tag></td><td className="px-4 py-3 text-xs">{formatDateTime(run.scheduledAt)}</td><td className="px-4 py-3">{run.attempts}</td><td className="px-4 py-3"><div className={run.error ? "max-w-md text-red-500" : "max-w-md text-gray-600 dark:text-gray-300"}>{run.error || run.output || "--"}</div></td></tr>
+                <tr key={run.id}><td className="px-4 py-3 font-medium">{taskByID.get(run.taskId)?.name || `#${run.taskId}`}</td><td className="px-4 py-3">{deviceByID.get(run.deviceId)?.name || run.deviceId}</td><td className="px-4 py-3"><Tag type={run.status === "success" ? "success" : run.status === "failed" ? "danger" : run.status === "running" ? "warning" : "info"}>{({ queued: t("排队中"), running: t("执行中"), success: t("成功"), failed: t("失败") })[run.status]}</Tag></td><td className="px-4 py-3 text-xs">{formatDateTime(run.scheduledAt)}</td><td className="px-4 py-3">{run.attempts}</td><td className="px-4 py-3"><div className={run.error ? "max-w-md text-red-500" : "max-w-md text-gray-600 dark:text-gray-300"}>{run.error || run.output || "--"}</div></td><td className="px-4 py-3 text-right"><Button size="small" variant="danger" icon={<DeleteRegular />} loading={runBusy === run.id} disabled={run.status === "queued" || run.status === "running"} onClick={() => void removeRun(run)}>{t("删除")}</Button></td></tr>
               ))}
             </tbody>
           </table>

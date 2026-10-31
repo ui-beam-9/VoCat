@@ -98,6 +98,45 @@ func (s *Store) DeleteAutomaticTask(ctx context.Context, id int64) error {
 	return nil
 }
 
+// ErrAutomaticTaskRunActive 表示执行记录仍在排队或执行中，调度器还会更新它，
+// 因此不能从历史记录里删除。
+var ErrAutomaticTaskRunActive = errors.New("store: automatic task run is still active")
+
+// DeleteAutomaticTaskRun 删除一条已结束（success/failed）的执行记录。
+// 排队中/执行中的记录会被拒绝，避免调度器后续更新一条已经不存在的记录；
+// availableOnly 与 ListAvailableAutomaticTaskRunsPaginated 的可见性规则保持一致，
+// 标准产品面无法删除未对外暴露的任务（如 public_ip）的记录。
+func (s *Store) DeleteAutomaticTaskRun(ctx context.Context, id int64, availableOnly bool) error {
+	if id <= 0 {
+		return ErrNotFound
+	}
+	query := `DELETE FROM automatic_task_runs WHERE id = ? AND status IN ('success', 'failed')`
+	if availableOnly {
+		query += ` AND task_id IN (SELECT id FROM automatic_tasks WHERE task_type <> 'public_ip')`
+	}
+	result, err := s.db.ExecContext(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("delete automatic task run %d: %w", id, err)
+	}
+	if count, _ := result.RowsAffected(); count > 0 {
+		return nil
+	}
+	// 没有删掉时区分原因：不存在 / 仍在执行 / 不可见。
+	var status string
+	err = s.db.QueryRowContext(ctx, `SELECT status FROM automatic_task_runs WHERE id = ?`, id).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("read automatic task run %d: %w", id, err)
+	}
+	if status != "success" && status != "failed" {
+		return ErrAutomaticTaskRunActive
+	}
+	// 终态记录但被可见性规则挡住：按不存在处理，避免泄露隐藏记录。
+	return ErrNotFound
+}
+
 func (s *Store) ClaimDueAutomaticTasks(ctx context.Context, now time.Time, limit int) ([]AutomaticTaskRun, error) {
 	return s.claimDueAutomaticTasks(ctx, now, limit, false)
 }

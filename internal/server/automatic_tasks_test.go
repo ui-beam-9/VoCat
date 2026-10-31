@@ -1,6 +1,10 @@
 package server
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -93,4 +97,69 @@ func TestAutomaticSMSRetrySafetyPreventsDuplicateSubmission(t *testing.T) {
 	if !automaticSMSRetrySafe(safe) {
 		t.Fatal("unattempted SMS was not considered safe to retry")
 	}
+}
+
+// 执行记录删除接口：排队中/执行中返回 409，已结束返回 200，不存在返回 404，
+// 非法 ID 返回 400。
+func TestDeleteAutomaticTaskRunEndpoint(t *testing.T) {
+	server := blockedRegionServer(t, "310260123456789")
+	ctx := context.Background()
+	if err := server.store.UpsertDevice(ctx, store.Device{ID: "dev1", Name: "Modem"}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := server.store.SaveAutomaticTask(ctx, store.AutomaticTask{
+		Name: "task", Enabled: true, DeviceID: "dev1", ProfileICCID: "test-card",
+		TaskType: "sms", Environment: "vowifi", IntervalDays: 1,
+		StartDate: "2026-10-31", RunTime: "12:00", Timezone: "Asia/Shanghai",
+		Payload: []byte(`{}`), NextRunAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := server.store.QueueAutomaticTaskNow(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if status, body := deleteAutomaticTaskRunRequest(server, run.ID); status != http.StatusConflict {
+		t.Fatalf("queued run delete status = %d (%s), want 409", status, body)
+	}
+
+	run.StartedAt, run.FinishedAt, run.Status = time.Now().UTC(), time.Now().UTC(), "success"
+	if err := server.store.UpdateAutomaticTaskRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	if status, body := deleteAutomaticTaskRunRequest(server, run.ID); status != http.StatusOK {
+		t.Fatalf("finished run delete status = %d (%s), want 200", status, body)
+	}
+	if status, body := deleteAutomaticTaskRunRequest(server, run.ID); status != http.StatusNotFound {
+		t.Fatalf("missing run delete status = %d (%s), want 404", status, body)
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodDelete, "/api/automatic-tasks/runs/abc", nil)
+	if !server.routeAutomaticTasksAPI(recorder, request, "automatic-tasks/runs/abc") {
+		t.Fatal("invalid run ID route was not handled")
+	}
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("invalid run ID status = %d, want 400", recorder.Code)
+	}
+
+	runs, err := server.store.ListAutomaticTaskRuns(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("runs after delete = %+v, want none", runs)
+	}
+}
+
+func deleteAutomaticTaskRunRequest(server *Server, id int64) (int, string) {
+	path := "automatic-tasks/runs/" + strconv.FormatInt(id, 10)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodDelete, "/api/"+path, nil)
+	if !server.routeAutomaticTasksAPI(recorder, request, path) {
+		return 0, "route not handled"
+	}
+	return recorder.Code, recorder.Body.String()
 }

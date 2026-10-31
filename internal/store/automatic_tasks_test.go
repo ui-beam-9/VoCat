@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -227,5 +228,76 @@ func TestRecoverAutomaticTaskRunsFailsRunningAndReturnsQueued(t *testing.T) {
 	}
 	if recoveredTask.LastStatus != "failed" || !strings.Contains(recoveredTask.LastError, "service restarted") {
 		t.Fatalf("recovered task status = %+v", recoveredTask)
+	}
+}
+
+// 只有已结束（成功/失败）的执行记录可以删除，排队中/执行中的记录必须拒绝，
+// 否则调度器后续更新一条已经不存在的记录。
+func TestDeleteAutomaticTaskRunOnlyAllowsFinishedRuns(t *testing.T) {
+	ctx := context.Background()
+	database := openTestStore(t, filepath.Join(t.TempDir(), "automatic-task-run-delete.db"))
+	mustSaveDevice(t, database, "ec20", "EC20")
+	task, err := database.SaveAutomaticTask(ctx, AutomaticTask{
+		Name: "task", Enabled: true, DeviceID: "ec20", ProfileICCID: "one",
+		TaskType: "sms", Environment: "vowifi", IntervalDays: 1,
+		StartDate: "2026-08-10", RunTime: "12:00", Timezone: "Asia/Shanghai", Payload: []byte(`{}`),
+		NextRunAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.QueueAutomaticTaskNow(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DeleteAutomaticTaskRun(ctx, run.ID, false); !errors.Is(err, ErrAutomaticTaskRunActive) {
+		t.Fatalf("delete queued run error = %v, want ErrAutomaticTaskRunActive", err)
+	}
+	run.StartedAt, run.FinishedAt, run.Status = time.Now().UTC(), time.Now().UTC(), "success"
+	if err := database.UpdateAutomaticTaskRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DeleteAutomaticTaskRun(ctx, run.ID, false); err != nil {
+		t.Fatalf("delete finished run: %v", err)
+	}
+	runs, err := database.ListAutomaticTaskRuns(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("runs after delete = %+v, want none", runs)
+	}
+	if err := database.DeleteAutomaticTaskRun(ctx, run.ID, false); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete missing run error = %v, want ErrNotFound", err)
+	}
+}
+
+// 标准产品面看不到的任务（如 public_ip）的记录同样不能删除。
+func TestDeleteAutomaticTaskRunRespectsAvailability(t *testing.T) {
+	ctx := context.Background()
+	database := openTestStore(t, filepath.Join(t.TempDir(), "automatic-task-run-availability.db"))
+	mustSaveDevice(t, database, "ec20", "EC20")
+	task, err := database.SaveAutomaticTask(ctx, AutomaticTask{
+		Name: "task", Enabled: true, DeviceID: "ec20", ProfileICCID: "one",
+		TaskType: "public_ip", Environment: "cellular", IntervalDays: 1,
+		StartDate: "2026-08-10", RunTime: "12:00", Timezone: "Asia/Shanghai", Payload: []byte(`{}`),
+		NextRunAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.QueueAutomaticTaskNow(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.StartedAt, run.FinishedAt, run.Status = time.Now().UTC(), time.Now().UTC(), "failed"
+	if err := database.UpdateAutomaticTaskRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DeleteAutomaticTaskRun(ctx, run.ID, true); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("available-only delete error = %v, want ErrNotFound", err)
+	}
+	if err := database.DeleteAutomaticTaskRun(ctx, run.ID, false); err != nil {
+		t.Fatalf("developer delete error = %v, want success", err)
 	}
 }
