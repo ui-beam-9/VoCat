@@ -149,7 +149,9 @@ func (scheduler *automaticTaskScheduler) execute(run store.AutomaticTaskRun) {
 			run.Output = fmt.Sprintf("第 %d 次尝试：%s", attempt, message)
 			_ = scheduler.server.store.UpdateAutomaticTaskRun(context.Background(), run)
 		}
-		operationContext, cancel := context.WithTimeout(scheduler.ctx, automaticTaskMaxRuntime)
+		// 总预算按任务类型计算：call 任务必须覆盖「建立通话 + 保持设定时长 + 收尾」，
+		// 否则 600 秒的通话会被固定的 8 分钟总超时截断。
+		operationContext, cancel := context.WithTimeout(scheduler.ctx, automaticTaskRuntimeLimit(task))
 		output, err = scheduler.server.executeAutomaticTask(operationContext, task, progress)
 		cancel()
 		if err == nil {
@@ -274,7 +276,7 @@ func (s *Server) executeAutomaticTask(ctx context.Context, task store.AutomaticT
 		output, err = s.executeAutomaticSMS(ctx, task, payload)
 	case "call":
 		progress("正在发起通话")
-		output, err = s.executeAutomaticCall(ctx, task, payload)
+		output, err = s.executeAutomaticCall(ctx, task, payload, progress)
 	case "cellular_attach":
 		output = "已注册蜂窝网络，未启用数据连接"
 	case "public_ip":
@@ -607,26 +609,6 @@ func automaticSMSRetrySafe(body []byte) bool {
 		return *payload.Data.RetrySafe
 	}
 	return payload.Data.PartsAttempted == 0 && payload.Data.PartsAccepted == 0
-}
-
-func (s *Server) executeAutomaticCall(ctx context.Context, task store.AutomaticTask, payload automaticTaskPayload) (string, error) {
-	config, err := s.store.Device(ctx, task.DeviceID)
-	if err != nil {
-		return "", err
-	}
-	_, physicalID, present := s.physicalForConfig(config)
-	if !present {
-		return "", errors.New("configured device is offline")
-	}
-	body, _ := json.Marshal(map[string]any{"number": payload.Phone, "duration_seconds": payload.DurationSeconds})
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/devices/calls/dial", bytes.NewReader(body))
-	request.Header.Set("Content-Type", "application/json")
-	s.handleCallAction(recorder, request, config, physicalID, "dial")
-	if recorder.Code < 200 || recorder.Code >= 300 {
-		return "", fmt.Errorf("dial failed (HTTP %d): %s", recorder.Code, compactAutomaticResponse(recorder.Body.Bytes()))
-	}
-	return fmt.Sprintf("已拨打 %s，将在 %d 秒后自动挂断", payload.Phone, payload.DurationSeconds), nil
 }
 
 func (s *Server) executeAutomaticPublicIP(ctx context.Context, config store.Device, iccid string) (string, error) {
