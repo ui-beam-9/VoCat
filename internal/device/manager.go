@@ -59,6 +59,7 @@ type Manager struct {
 	qmiRadioOpener                qmiRadioSessionOpener
 	remoteprocObserver            func(string) (remoteproc.Observation, error)
 	qmiDataOpener                 qmiDataSessionOpener
+	atHostDataLink                atHostDataLink
 	nativeQMIRegistrationMu       sync.Mutex
 	nativeQMIRegistrationInFlight map[string]struct{}
 	nativeQMISIMRecoveryMu        sync.Mutex
@@ -135,6 +136,8 @@ type managedDevice struct {
 	dataSession          qmiDataSession
 	dataSessionHandle    uint32
 	dataSessionControl   string
+	atHostSession        atHostDataSession
+	dataBackend          string // selected backend, retained while its session is disconnected
 	dataEventCancel      context.CancelFunc
 	candidate            modem.Candidate
 	atProfile            modem.ATProfile
@@ -197,6 +200,7 @@ func NewManager(options Options) (*Manager, error) {
 
 		qmiRadioOpener:                openQMIRadioSession,
 		qmiDataOpener:                 openQMIDataSession,
+		atHostDataLink:                newATHostDataLink(),
 		nativeQMIRegistrationInFlight: make(map[string]struct{}),
 		networkEventSubscribers:       make(map[chan string]struct{}),
 		deviceEventSubscribers:        make(map[chan DeviceLifecycleEvent]struct{}),
@@ -252,7 +256,9 @@ func (manager *Manager) Stop(ctx context.Context) error {
 		}
 		state.opMu.Unlock()
 		state.dataMu.Lock()
-		invalidateQMINetworkSession(state, manager.candidateFor(state))
+		if err := invalidateNetworkSessions(state, manager.candidateFor(state)); err != nil {
+			closeErrors = append(closeErrors, err)
+		}
 		state.dataMu.Unlock()
 	}
 	return errors.Join(closeErrors...)
@@ -389,7 +395,7 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 		}
 		state.opMu.Unlock()
 		state.dataMu.Lock()
-		invalidateQMINetworkSession(state, manager.candidateFor(state))
+		invalidateNetworkSessions(state, manager.candidateFor(state))
 		state.dataMu.Unlock()
 	}
 	manager.resetChangedClients()
@@ -523,7 +529,7 @@ func (manager *Manager) resetChangedClients() {
 		}
 		state.opMu.Unlock()
 		state.dataMu.Lock()
-		invalidateQMINetworkSession(state, manager.candidateFor(state))
+		invalidateNetworkSessions(state, manager.candidateFor(state))
 		state.dataMu.Unlock()
 	}
 }
@@ -962,6 +968,33 @@ func (manager *Manager) ExecuteAT(
 	return response, err
 }
 
+// SupportsCLCC reports whether the firmware behind a device implements the
+// 3GPP call-list query. Pollers use it to skip firmware that answers with
+// "command not recognized" instead of burning a control-channel round trip
+// every cycle. Unknown devices report true so their presence handling stays
+// with the caller, and every device without an identity profile override
+// keeps the historical polling behavior.
+//
+// The identity profile is written under opMu, so the answer is read under the
+// same lock. A caller that cannot take the lock in time gets the error and
+// decides for itself; a long operator scan must not stall a call poll.
+func (manager *Manager) SupportsCLCC(ctx context.Context, id string) (bool, error) {
+	manager.mu.RLock()
+	state := manager.devices[id]
+	manager.mu.RUnlock()
+	if state == nil {
+		return true, nil
+	}
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		return true, err
+	}
+	defer state.opMu.Unlock()
+	if state.atProfile.Identity == nil {
+		return true, nil
+	}
+	return state.atProfile.Identity.SupportsCLCC(), nil
+}
+
 // ExecuteSensitiveAT runs an AT command whose payload contains short-lived
 // authentication material. The original transport error is returned to the
 // caller, but it is never retained in the device snapshot because a
@@ -1143,8 +1176,12 @@ func (manager *Manager) Reboot(ctx context.Context, id string) error {
 		return err
 	}
 	state.dataMu.Lock()
-	invalidateQMINetworkSession(state, manager.candidateFor(state))
+	cleanupErr := invalidateNetworkSessions(state, manager.candidateFor(state))
 	state.dataMu.Unlock()
+	if cleanupErr != nil {
+		manager.setResult(id, state, nil, cleanupErr)
+		return cleanupErr
+	}
 	commandCtx, cancel := manager.withTimeout(ctx, manager.longTimeout)
 	defer cancel()
 	_, err = client.Execute(commandCtx, "AT+CFUN=1,1")
@@ -1193,8 +1230,12 @@ func (manager *Manager) softResetForProfileSwitch(ctx context.Context, id string
 // softResetSIMLocked 要求持有 opMu，使模式验证与 SIM 重置不能被其他模组操作插入。
 func (manager *Manager) softResetSIMLocked(ctx context.Context, id string, state *managedDevice, client modem.Client) error {
 	state.dataMu.Lock()
-	invalidateQMINetworkSession(state, manager.candidateFor(state))
+	cleanupErr := invalidateNetworkSessions(state, manager.candidateFor(state))
 	state.dataMu.Unlock()
+	if cleanupErr != nil {
+		manager.setResult(id, state, nil, cleanupErr)
+		return cleanupErr
+	}
 	commandCtx, cancel := context.WithTimeout(ctx, manager.commandTimeout)
 	defer cancel()
 
@@ -1283,6 +1324,24 @@ func (manager *Manager) sensitiveCommand(
 	response, err := client.Execute(commandCtx, command)
 	if err != nil {
 		return response, errors.New("sensitive modem command failed")
+	}
+	return response, nil
+}
+
+// timedCommand executes an AT command with an explicit timeout. The data
+// backend uses it for attach/activate, whose vendor retry budgets exceed the
+// generic long timeout.
+func (manager *Manager) timedCommand(
+	ctx context.Context,
+	client modem.Client,
+	command string,
+	timeout time.Duration,
+) (modem.Response, error) {
+	commandCtx, cancel := manager.withTimeout(ctx, timeout)
+	defer cancel()
+	response, err := client.Execute(commandCtx, command)
+	if err != nil {
+		return response, fmt.Errorf("%s: %w", command, err)
 	}
 	return response, nil
 }
