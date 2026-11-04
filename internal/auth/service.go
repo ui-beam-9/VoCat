@@ -65,10 +65,18 @@ type Credentials struct {
 }
 
 type AuthenticatedSession struct {
-	Principal Principal
-	ExpiresAt time.Time
-	tokenHash []byte
-	csrfHash  []byte
+	Principal     Principal
+	ExpiresAt     time.Time
+	LoginMethod   string
+	SecureCookies bool
+	tokenHash     []byte
+	csrfHash      []byte
+}
+
+// TokenHash returns a copy of the session digest for atomic authorization checks.
+// The browser's raw session credential is never exposed by an authenticated view.
+func (s AuthenticatedSession) TokenHash() []byte {
+	return append([]byte(nil), s.tokenHash...)
 }
 
 func New(database *store.Store, options Options) (*Service, error) {
@@ -154,7 +162,8 @@ func (s *Service) ResetAdminCredentials(ctx context.Context, username string, pa
 	return nil
 }
 
-func (s *Service) Login(ctx context.Context, username string, password string) (Credentials, error) {
+// Login verifies the local password and persists fresh session and CSRF credentials before returning them.
+func (s *Service) Login(ctx context.Context, username string, password string, secureCookies bool) (Credentials, error) {
 	admin, err := s.store.AdminByUsername(ctx, strings.TrimSpace(username))
 	if errors.Is(err, store.ErrNotFound) {
 		_ = comparePassword(s.dummyHash, password)
@@ -170,6 +179,20 @@ func (s *Service) Login(ctx context.Context, username string, password string) (
 	if err := s.store.DeleteExpiredSessions(ctx, time.Now()); err != nil {
 		return Credentials{}, err
 	}
+	credentials, err := s.PrepareCredentials(Principal{ID: admin.ID, Username: admin.Username})
+	if err != nil {
+		return Credentials{}, err
+	}
+	if err := s.store.CreateSession(ctx, admin.ID, hashToken(credentials.SessionToken), hashToken(credentials.CSRFToken), credentials.ExpiresAt, secureCookies); err != nil {
+		return Credentials{}, err
+	}
+	return credentials, nil
+}
+
+// PrepareCredentials generates independent local Session and CSRF material
+// without persisting it. The caller must atomically commit SSO authorization
+// before delivering these raw credentials to the browser.
+func (s *Service) PrepareCredentials(principal Principal) (Credentials, error) {
 	sessionToken, err := randomToken()
 	if err != nil {
 		return Credentials{}, err
@@ -179,26 +202,15 @@ func (s *Service) Login(ctx context.Context, username string, password string) (
 		return Credentials{}, err
 	}
 	expiresAt := time.Now().UTC().Add(s.sessionTTL)
-	if err := s.store.CreateSession(
-		ctx,
-		admin.ID,
-		hashToken(sessionToken),
-		hashToken(csrfToken),
-		expiresAt,
-	); err != nil {
-		return Credentials{}, err
-	}
 	return Credentials{
 		SessionToken: sessionToken,
 		CSRFToken:    csrfToken,
 		ExpiresAt:    expiresAt,
-		Principal: Principal{
-			ID:       admin.ID,
-			Username: admin.Username,
-		},
+		Principal:    principal,
 	}, nil
 }
 
+// Authenticate resolves a live session and exposes its principal, expiry, and original login method.
 func (s *Service) Authenticate(ctx context.Context, sessionToken string) (AuthenticatedSession, error) {
 	if sessionToken == "" {
 		return AuthenticatedSession{}, ErrUnauthorized
@@ -220,9 +232,11 @@ func (s *Service) Authenticate(ctx context.Context, sessionToken string) (Authen
 			ID:       session.Admin.ID,
 			Username: session.Admin.Username,
 		},
-		ExpiresAt: session.ExpiresAt,
-		tokenHash: tokenHash,
-		csrfHash:  session.CSRFHash,
+		ExpiresAt:     session.ExpiresAt,
+		LoginMethod:   session.LoginMethod,
+		SecureCookies: session.SecureCookies,
+		tokenHash:     tokenHash,
+		csrfHash:      session.CSRFHash,
 	}, nil
 }
 
@@ -497,3 +511,6 @@ func hashToken(token string) []byte {
 	digest := sha256.Sum256([]byte(token))
 	return digest[:]
 }
+
+// TokenHash derives the digest used by the store for session and CSRF material.
+func TokenHash(token string) []byte { return hashToken(token) }
